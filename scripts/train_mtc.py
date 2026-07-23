@@ -29,13 +29,18 @@ PRESETS = {
 }
 
 
-def ensure_model_local(cfg: TrainConfig):
+def ensure_model_local(cfg: TrainConfig, accelerator):
     local = cfg.local_model_dir
-    if not (local / "config.json").exists():
+    done_file = local / ".download_complete"
+    if done_file.exists():
+        return
+
+    if accelerator.is_main_process:
         print(f"Downloading {cfg.model_id} → {local} ...")
         snapshot_download(cfg.model_id, local_dir=str(local), local_dir_use_symlinks=False)
-    else:
-        print(f"Model already at {local}")
+        done_file.touch()
+
+    accelerator.wait_for_everyone()
 
 
 def main():
@@ -55,7 +60,7 @@ def main():
         print(f"Model:  {cfg.model_id}")
         print(f"Config: {args.config or 'default'}")
 
-    ensure_model_local(cfg)
+    ensure_model_local(cfg, accelerator)
 
     if accelerator.is_main_process:
         print(f"Loading model from {cfg.local_model_dir} ...")
