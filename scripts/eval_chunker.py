@@ -41,8 +41,15 @@ def make_prompt(base: str, target_tokens: int, tokenizer) -> str:
 def main():
     MODEL_DIR = Path("models/Qwen_Qwen3.5-0.8B-Base")
 
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
+    if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+        # Use a different GPU than training, or CPU to avoid OOM
+        import os
+        if "CUDA_VISIBLE_DEVICES" in os.environ:
+            device = torch.device("cuda")
+        else:
+            # Training is using all GPUs — use CPU to not compete
+            print("All GPUs busy (training) — using CPU for eval")
+            device = torch.device("cpu")
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
     else:
@@ -63,13 +70,15 @@ def main():
     print(f"Checkpoint: step={ckpt.get('step', '?')}  chunker={ckpt['chunker_type']}  K={K}")
 
     tokenizer = AutoTokenizer.from_pretrained(str(MODEL_DIR))
-    model = AutoModelForCausalLM.from_pretrained(
-        str(MODEL_DIR),
-        dtype=torch.float16,
-        attn_implementation="eager",
-        low_cpu_mem_usage=True,
-    )
-    model = model.to(device)
+    dtype = torch.float32 if device.type == "cpu" else torch.float16
+    load_kwargs = dict(dtype=dtype, attn_implementation="eager")
+    if device.type == "cpu":
+        model = AutoModelForCausalLM.from_pretrained(str(MODEL_DIR), **load_kwargs)
+        model = model.to(device)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            str(MODEL_DIR), device_map={"": device}, **load_kwargs
+        )
     model.eval()
 
     mtc = MTCModel(
