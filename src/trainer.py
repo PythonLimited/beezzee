@@ -112,6 +112,8 @@ class MTCTrainer:
 
         # 3. MSE loss + straight-through proxy
         loss = F.mse_loss(student_hidden, teacher_hidden)
+        # Normalize by hidden dim for a more interpretable scale
+        norm_loss = loss.item() / student_hidden.shape[-1]
         grad_output = (student_hidden - teacher_hidden) * (2.0 / student_hidden.numel())
 
         # Proxy loss: backprop through this gives same chunker grad as
@@ -124,7 +126,7 @@ class MTCTrainer:
             top1 = (t_logits.argmax(-1) == s_logits.argmax(-1)).float().mean().item()
 
         return {
-            "loss": loss.item(),
+            "loss": norm_loss,
             "top1_match": top1,
             "lr": self.scheduler.get_last_lr()[0],
             "_proxy_loss": proxy_loss,

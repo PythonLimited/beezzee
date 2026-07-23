@@ -187,6 +187,7 @@ def main():
                 avg_top1 = running_top1 / cfg.eval_every
                 print(
                     f"  Step {step+1:5d}/{cfg.steps} | "
+                    f"len:{input_ids.shape[1]:5d} | "
                     f"loss: {avg_loss:.6f} | "
                     f"top1: {avg_top1:.3f} | "
                     f"lr: {metrics['lr']:.4e}"
