@@ -167,10 +167,26 @@ def main():
             if device.type == "mps" and N > 4096:
                 torch.mps.empty_cache()
 
-    print(f"{'─'*72}")
+    print(f"{'─'*78}")
     print(f"  Top-1 match: {matched}/{total}")
-    print(f"{'─'*72}")
+    print(f"{'─'*78}")
 
+    # ── Generation comparison ──
+    gen_prompt = "The capital of France is Paris. The capital of Germany is Berlin."
+    gen_ids = tokenizer(gen_prompt, return_tensors="pt").input_ids.to(device)
 
-if __name__ == "__main__":
-    main()
+    with torch.no_grad():
+        _, std_cache = mtc.standard_prefill(gen_ids)
+        _, mtc_cache = mtc.prefill(gen_ids)
+
+    std_gen = mtc.generate_from_cache(gen_ids, std_cache, max_new_tokens=25)
+    mtc_gen = mtc.generate_from_cache(gen_ids, mtc_cache, max_new_tokens=25)
+
+    std_text = tokenizer.decode(std_gen[0], skip_special_tokens=True)
+    mtc_text = tokenizer.decode(mtc_gen[0], skip_special_tokens=True)
+
+    print(f"\n  Generation ({gen_prompt})")
+    print(f"  std:  {std_text}")
+    print(f"  mtc:  {mtc_text}")
+    print(f"  match: {'✓ identical' if std_text == mtc_text else '✗ differs'}")
+    print()
