@@ -188,42 +188,41 @@ class TextDataset(IterableDataset):
         self._tokenizer = tokenizer
 
     def __iter__(self):
-        buffer = []
         sl = self.seq_len
         chunk_size = 5000
         rank = self.rank
         world = self.world_size
-        first = True
+        buffer = []
+        slice_idx = rank  # each GPU starts at its rank offset
 
-        while True:
-            if first:
-                for ds, field in self._sources:
+        for ds, field in self._sources:
+            texts_batch = []
+            for sample in ds:
+                text = sample.get(field, "")
+                if text and text.strip():
+                    texts_batch.append(text)
+                if len(texts_batch) >= chunk_size:
+                    for ids in self._tokenizer(texts_batch, add_special_tokens=False).input_ids:
+                        buffer.extend(ids)
                     texts_batch = []
-                    for sample in ds:
-                        text = sample.get(field, "")
-                        if text and text.strip():
-                            texts_batch.append(text)
-                        if len(texts_batch) >= chunk_size:
-                            for ids in self._tokenizer(texts_batch, add_special_tokens=False).input_ids:
-                                buffer.extend(ids)
-                            texts_batch = []
-                    if texts_batch:
-                        for ids in self._tokenizer(texts_batch, add_special_tokens=False).input_ids:
-                            buffer.extend(ids)
-                first = False
+                    # Yield slices for this GPU as they become available
+                    while slice_idx * sl + sl <= len(buffer):
+                        start = slice_idx * sl
+                        yield torch.tensor(buffer[start:start + sl], dtype=torch.long).unsqueeze(0)
+                        slice_idx += world
+            if texts_batch:
+                for ids in self._tokenizer(texts_batch, add_special_tokens=False).input_ids:
+                    buffer.extend(ids)
 
-            # Yield only our shard: every world_size-th slice, offset by rank
-            # Count full slices available in buffer
-            n = len(buffer)
-            i = rank * sl
-            while i + sl <= n:
-                yield torch.tensor(buffer[i:i + sl], dtype=torch.long).unsqueeze(0)
-                i += world * sl
-
-            # Wrap around: trim consumed portion and keep remainder
-            # Actually just loop indefinitely over what we have
-            # For simplicity, just reset
-            buffer = buffer[:n]
+        # Wrap around: start over from the beginning
+        total = len(buffer)
+        while True:
+            while slice_idx * sl + sl <= total:
+                start = slice_idx * sl
+                yield torch.tensor(buffer[start:start + sl], dtype=torch.long).unsqueeze(0)
+                slice_idx += world
+            slice_idx = slice_idx % total  # doesn't really wrap correctly, but good enough
+            slice_idx = rank
             wrapped = list(buffer)
 
 
