@@ -146,10 +146,12 @@ class TextDataset(IterableDataset):
 
     CACHE_DIR = Path("datasets")
 
-    def __init__(self, tokenizer, seq_len: int = 256):
+    def __init__(self, tokenizer, seq_len: int = 256, rank: int = 0, world_size: int = 1):
         from datasets import load_dataset, load_from_disk
 
         self.seq_len = seq_len
+        self.rank = rank
+        self.world_size = world_size
         self.CACHE_DIR.mkdir(exist_ok=True)
 
         data_sources = []
@@ -188,38 +190,40 @@ class TextDataset(IterableDataset):
     def __iter__(self):
         buffer = []
         sl = self.seq_len
-        chunk_size = 5000  # batch-tokenize this many texts at once
+        chunk_size = 5000
+        rank = self.rank
+        world = self.world_size
+        first = True
 
-        for ds, field in self._sources:
-            texts_batch = []
-            for sample in ds:
-                text = sample.get(field, "")
-                if text and text.strip():
-                    texts_batch.append(text)
-                if len(texts_batch) >= chunk_size:
-                    for ids in self._tokenizer(texts_batch, add_special_tokens=False).input_ids:
-                        buffer.extend(ids)
-                        while len(buffer) >= sl:
-                            yield torch.tensor(buffer[:sl], dtype=torch.long).unsqueeze(0)
-                            buffer = buffer[sl:]
-                    texts_batch = []
-            # Flush remaining
-            if texts_batch:
-                for ids in self._tokenizer(texts_batch, add_special_tokens=False).input_ids:
-                    buffer.extend(ids)
-                    while len(buffer) >= sl:
-                        yield torch.tensor(buffer[:sl], dtype=torch.long).unsqueeze(0)
-                        buffer = buffer[sl:]
-
-        # Wrap around forever from buffer residue
-        wrapped = list(buffer)
         while True:
-            buffer = wrapped[:]
-            wrapped = []
-            while len(buffer) >= sl:
-                yield torch.tensor(buffer[:sl], dtype=torch.long).unsqueeze(0)
-                buffer = buffer[sl:]
-            # Refill
+            if first:
+                for ds, field in self._sources:
+                    texts_batch = []
+                    for sample in ds:
+                        text = sample.get(field, "")
+                        if text and text.strip():
+                            texts_batch.append(text)
+                        if len(texts_batch) >= chunk_size:
+                            for ids in self._tokenizer(texts_batch, add_special_tokens=False).input_ids:
+                                buffer.extend(ids)
+                            texts_batch = []
+                    if texts_batch:
+                        for ids in self._tokenizer(texts_batch, add_special_tokens=False).input_ids:
+                            buffer.extend(ids)
+                first = False
+
+            # Yield only our shard: every world_size-th slice, offset by rank
+            # Count full slices available in buffer
+            n = len(buffer)
+            i = rank * sl
+            while i + sl <= n:
+                yield torch.tensor(buffer[i:i + sl], dtype=torch.long).unsqueeze(0)
+                i += world * sl
+
+            # Wrap around: trim consumed portion and keep remainder
+            # Actually just loop indefinitely over what we have
+            # For simplicity, just reset
+            buffer = buffer[:n]
             wrapped = list(buffer)
 
 

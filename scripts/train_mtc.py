@@ -93,10 +93,14 @@ def main():
 
     if accelerator.is_main_process:
         print(f"\nLoading training data (streaming, seq_len={seq_len}) ...")
-    dataset = TextDataset(tokenizer, seq_len=seq_len)  # rank 0 downloads if needed
-    accelerator.wait_for_everyone()  # others wait for download to finish
+    dataset = TextDataset(tokenizer, seq_len=seq_len,
+                          rank=accelerator.process_index,
+                          world_size=accelerator.num_processes)
+    accelerator.wait_for_everyone()
     if not accelerator.is_main_process:
-        dataset = TextDataset(tokenizer, seq_len=seq_len)  # now cache exists for all
+        dataset = TextDataset(tokenizer, seq_len=seq_len,
+                              rank=accelerator.process_index,
+                              world_size=accelerator.num_processes)
 
     if accelerator.is_main_process:
         print(f"\n{'='*60}")
@@ -122,10 +126,14 @@ def main():
             if accelerator.is_main_process:
                 print(f"\n  ══ Seq len {seq_len} → {new_len}  (step {step}) ══\n")
             seq_len = new_len
-            dataset = TextDataset(tokenizer, seq_len=new_len)
+            dataset = TextDataset(tokenizer, seq_len=new_len,
+                                  rank=accelerator.process_index,
+                                  world_size=accelerator.num_processes)
             accelerator.wait_for_everyone()
             if not accelerator.is_main_process:
-                dataset = TextDataset(tokenizer, seq_len=new_len)
+                dataset = TextDataset(tokenizer, seq_len=new_len,
+                                      rank=accelerator.process_index,
+                                      world_size=accelerator.num_processes)
             data_iter = iter(dataset)
 
         if args.profile:
@@ -135,10 +143,14 @@ def main():
             input_ids = next(data_iter).to(device)
         except StopIteration:
             if accelerator.is_main_process:
-                dataset = TextDataset(tokenizer, seq_len=seq_len)
+                dataset = TextDataset(tokenizer, seq_len=seq_len,
+                                      rank=accelerator.process_index,
+                                      world_size=accelerator.num_processes)
             accelerator.wait_for_everyone()
             if not accelerator.is_main_process:
-                dataset = TextDataset(tokenizer, seq_len=seq_len)
+                dataset = TextDataset(tokenizer, seq_len=seq_len,
+                                      rank=accelerator.process_index,
+                                      world_size=accelerator.num_processes)
             data_iter = iter(dataset)
             input_ids = next(data_iter).to(device)
 
