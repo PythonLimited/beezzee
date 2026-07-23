@@ -42,16 +42,7 @@ def main():
     MODEL_DIR = Path("models/Qwen_Qwen3.5-0.8B-Base")
 
     if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-        # Use a different GPU than training, or CPU to avoid OOM
-        import os
-        if "CUDA_VISIBLE_DEVICES" in os.environ:
-            device = torch.device("cuda")
-        else:
-            # Training is using all GPUs — use CPU to not compete
-            print("All GPUs busy (training) — using CPU for eval")
-            device = torch.device("cpu")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
+        device = torch.device("cuda")
     else:
         device = torch.device("cpu")
     print(f"Device: {device}")
@@ -190,3 +181,7 @@ def main():
     print(f"  mtc:  {mtc_text}")
     print(f"  match: {'✓ identical' if std_text == mtc_text else '✗ differs'}")
     print()
+
+
+if __name__ == "__main__":
+    main()
