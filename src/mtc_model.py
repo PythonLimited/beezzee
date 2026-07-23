@@ -52,13 +52,15 @@ class MTCModel(nn.Module):
         tokenizer: PreTrainedTokenizer,
         chunk_name: str = "mean",
         chunk_size: int = 4,
+        decompressor: nn.Module = None,
     ):
         super().__init__()
         self.base = base_model
         self.tokenizer = tokenizer
-        self._chunk_size = chunk_size
+        self.chunk_size = chunk_size
         self.hidden_dim = base_model.config.hidden_size
         self.chunker = build_chunker(chunk_name, self.hidden_dim, chunk_size)
+        self.decompressor = decompressor
 
         self.base.eval()
         for p in self.base.parameters():
@@ -105,6 +107,21 @@ class MTCModel(nn.Module):
             )
 
         cache: DynamicCache = outputs.past_key_values
+
+        # Expand full-attention KV via trained decompressor (if available)
+        if self.decompressor is not None:
+            expanded = DynamicCache()
+            for layer_idx, layer in enumerate(cache.layers):
+                if hasattr(layer, "keys") and hasattr(layer, "values"):
+                    k_exp = self.decompressor(layer.keys)[:, :, :N, :]
+                    v_exp = self.decompressor(layer.values)[:, :, :N, :]
+                    expanded.update(k_exp, v_exp, layer_idx)
+                else:
+                    while len(expanded.layers) <= layer_idx:
+                        expanded.layers.append(None)
+                    expanded.layers[layer_idx] = layer
+            cache = expanded
+
         last_hidden = outputs.last_hidden_state[:, -1:, :]
         logits = self.base.lm_head(last_hidden)
         return logits, cache
