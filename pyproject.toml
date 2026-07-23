@@ -9,4 +9,7 @@ dependencies = [
     "accelerate>=1.0",
     "openai>=1.0",
     "psutil",
+    "datasets",
+    "flash-linear-attention",
+    "causal-conv1d",
 ]
