@@ -1,10 +1,5 @@
 """
-Self-distillation training: teach the chunker to compress prompts
-while preserving the base model's hidden-state distribution.
-
-Uses a straight-through estimator — gradient flows only through the
-chunker, avoiding fp16 numerical instability in the frozen model.
-Requires no labeled data — any raw text works.
+Self-distillation training: joint training of chunker + decompressor.
 """
 
 from __future__ import annotations
@@ -30,103 +25,106 @@ def _is_main():
 
 
 class MTCTrainer:
-    """
-    Trains only the chunker via a straight-through estimator.
-
-    Gradient flow through the frozen fp16 model is numerically unstable.
-    Instead we:
-      1. Compute teacher & student hidden states under no_grad
-      2. Use the loss gradient w.r.t. hidden states as a proxy gradient
-         for the chunker output (approximating ∂model/∂input ≈ I)
-      3. Only backprop through the chunker (fp32, stable)
-    """
+    """Joint training of chunker (semantic) + decompressor (generation)."""
 
     def __init__(
         self,
         base_model: nn.Module,
         chunker: nn.Module,
         chunk_size: int = 4,
+        decompressor: nn.Module = None,
     ):
         self.base = base_model
         self.chunker = chunker
+        self.decompressor = decompressor
         self.chunk_size = chunk_size
 
         self.base.eval()
         for p in self.base.parameters():
             p.requires_grad = False
 
-        # Compile the model for faster no_grad forward passes
-        # "default" avoids CUDA graphs which conflict with multiple forward calls
-        self._compiled_model = torch.compile(
-            self.base.model, mode="default", fullgraph=False
-        )
+        self._compiled_model = torch.compile(self.base.model, mode="default", fullgraph=False)
 
         params = list(self.chunker.parameters())
-        print(f"Trainable chunker params: {sum(p.numel() for p in params):,}")
+        if decompressor is not None:
+            params += list(decompressor.parameters())
+        label = "chunker+decompressor" if decompressor else "chunker"
+        print(f"Trainable params: {sum(p.numel() for p in params):,} ({label})")
 
         self.optimizer = torch.optim.AdamW(params, lr=1e-4, weight_decay=0.01)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=5000, eta_min=1e-6
+            self.optimizer, T_max=15000, eta_min=1e-6
         )
 
     @torch.no_grad()
-    def _model_forward(self, embeds: torch.Tensor, pos_ids: torch.Tensor) -> torch.Tensor:
-        out = self._compiled_model(inputs_embeds=embeds, position_ids=pos_ids, use_cache=False)
-        return out.last_hidden_state
+    def _model(self, embeds, pos_ids, use_cache=False):
+        out = self._compiled_model(inputs_embeds=embeds, position_ids=pos_ids, use_cache=use_cache)
+        return out.last_hidden_state, out.past_key_values
 
     @torch.no_grad()
-    def _teacher_chunked(self, input_ids: torch.Tensor) -> torch.Tensor:
-        """Full forward → chunked hidden states matching student positions."""
+    def _teacher_chunked(self, input_ids):
         B, N = input_ids.shape
         K = self.chunk_size
         embeds = self.base.get_input_embeddings()(input_ids)
-        pos_ids = torch.arange(N, device=input_ids.device).unsqueeze(0)
-        full = self._model_forward(embeds, pos_ids)
+        pos = torch.arange(N, device=input_ids.device).unsqueeze(0)
+        full, kv = self._model(embeds, pos, use_cache=self.decompressor is not None)
 
         n_full = N // K
         chunked = full[:, :n_full * K, :].view(B, n_full, K, -1)[:, :, -1, :]
-        remainder = N % K
-        if remainder:
+        if N % K:
             chunked = torch.cat([chunked, full[:, -1:, :]], dim=1)
-        return chunked
+        return (chunked, kv) if self.decompressor is not None else chunked
 
     @torch.no_grad()
-    def _student_forward(self, compressed: torch.Tensor, N: int) -> torch.Tensor:
-        """Model forward on compressed embeddings → hidden states."""
-        pos_ids = torch.arange(N, device=compressed.device).unsqueeze(0)
-        pos_comp = compatible_position_ids(pos_ids, self.chunk_size)
-        return self._model_forward(compressed.to(dtype=next(self.base.parameters()).dtype), pos_comp)
+    def _student_forward(self, compressed, N):
+        pos = torch.arange(N, device=compressed.device).unsqueeze(0)
+        pos_c = compatible_position_ids(pos, self.chunk_size)
+        dtype = next(self.base.parameters()).dtype
+        return self._model(compressed.to(dtype), pos_c, use_cache=self.decompressor is not None)
 
-    def train_step(self, input_ids: torch.Tensor) -> dict:
-        """Forward pass + loss. Caller must do backward() + optimizer.step()."""
+    def train_step(self, input_ids):
         B, N = input_ids.shape
         K = self.chunk_size
 
-        # 1. Teacher target (no grad)
-        teacher_hidden = self._teacher_chunked(input_ids)
+        # Teacher
+        if self.decompressor is not None:
+            teacher_hidden, teacher_kv = self._teacher_chunked(input_ids)
+        else:
+            teacher_hidden = self._teacher_chunked(input_ids)
 
-        # 2. Student: chunker forward, model forward (no grad)
+        # Student
         embeddings = self.base.get_input_embeddings()(input_ids).detach()
         compressed = self.chunker(embeddings)
-        student_hidden = self._student_forward(compressed, N)
+        student_hidden, student_kv = self._student_forward(compressed, N)
 
-        # 3. MSE loss + straight-through proxy
-        loss = F.mse_loss(student_hidden, teacher_hidden)
-        # Normalize by hidden dim for a more interpretable scale
-        norm_loss = loss.item() / student_hidden.shape[-1]
+        # Chunker loss: MSE on hidden states (straight-through proxy)
+        loss_hidden = F.mse_loss(student_hidden, teacher_hidden)
         grad_output = (student_hidden - teacher_hidden) * (2.0 / student_hidden.numel())
-
-        # Proxy loss: backprop through this gives same chunker grad as
-        # straight-through estimator (dL/d(compressed) = grad_output)
         proxy_loss = (compressed * grad_output.to(compressed.dtype).detach()).sum()
 
+        # Decompressor loss: MSE on KV caches
+        loss_kv = torch.tensor(0.0, device=input_ids.device)
+        if self.decompressor is not None:
+            n_layers = 0
+            for comp_layer, gt_layer in zip(student_kv.layers, teacher_kv.layers):
+                if not (hasattr(comp_layer, "keys") and hasattr(gt_layer, "keys")):
+                    continue
+                exp_k = self.decompressor(comp_layer.keys)[:, :, :N, :]
+                exp_v = self.decompressor(comp_layer.values)[:, :, :N, :]
+                loss_kv += F.mse_loss(exp_k, gt_layer.keys) + F.mse_loss(exp_v, gt_layer.values)
+                n_layers += 1
+            if n_layers > 0:
+                loss_kv = loss_kv / n_layers
+
+        # Top-1 monitoring
         with torch.no_grad():
             t_logits = self.base.lm_head(teacher_hidden[:, -1:, :])
             s_logits = self.base.lm_head(student_hidden[:, -1:, :])
             top1 = (t_logits.argmax(-1) == s_logits.argmax(-1)).float().mean().item()
 
         return {
-            "loss": norm_loss,
+            "loss": loss_hidden.item() / student_hidden.shape[-1],
+            "loss_kv": loss_kv.item(),
             "top1_match": top1,
             "lr": self.scheduler.get_last_lr()[0],
             "_proxy_loss": proxy_loss,
@@ -137,18 +135,12 @@ class MTCTrainer:
 
 
 class TextDataset(IterableDataset):
-    """
-    Lazy-batched tokenization: loads text in chunks, batch-tokenizes via
-    the Rust tokenizer, yields fixed-length tensor slices. No up-front cost.
-    """
+    """Lazy-batched tokenization, yields fixed-length tensor slices."""
 
-    SOURCES = [
-        ("Salesforce/wikitext", "wikitext-103-raw-v1", "train", 1.0, "text", None),
-    ]
-
+    SOURCES = [("Salesforce/wikitext", "wikitext-103-raw-v1", "train", 1.0, "text", None)]
     CACHE_DIR = Path("datasets")
 
-    def __init__(self, tokenizer, seq_len: int = 256, rank: int = 0, world_size: int = 1):
+    def __init__(self, tokenizer, seq_len=256, rank=0, world_size=1):
         from datasets import load_dataset, load_from_disk
 
         self.seq_len = seq_len
@@ -157,29 +149,22 @@ class TextDataset(IterableDataset):
         self.CACHE_DIR.mkdir(exist_ok=True)
 
         data_sources = []
-        for path, name, split, weight, text_field, fraction in self.SOURCES:
+        for path, name, split, weight, field, fraction in self.SOURCES:
             cache_path = self.CACHE_DIR / path.replace("/", "_")
             if name:
                 cache_path = cache_path.with_name(f"{cache_path.name}_{name}")
-            if fraction:
-                cache_path = cache_path / f"{split}_{fraction.replace('%','pct')}"
-            else:
-                cache_path = cache_path / split
+            cache_path = cache_path / (f"{split}_{fraction.replace('%','pct')}" if fraction else split)
 
             try:
                 if cache_path.exists():
                     ds = load_from_disk(str(cache_path))
                 else:
                     if _is_main():
-                        label = f"{path}/{name or ''}" + (f" ({fraction})" if fraction else "")
-                        print(f"  Downloading {label} → {cache_path} ...")
+                        print(f"  Downloading {path}/{name or ''} → {cache_path} ...")
                     ds_split = f"{split}[{fraction}]" if fraction else split
-                    if name:
-                        ds = load_dataset(path, name, split=ds_split)
-                    else:
-                        ds = load_dataset(path, split=ds_split)
+                    ds = load_dataset(path, name, split=ds_split) if name else load_dataset(path, split=ds_split)
                     ds.save_to_disk(str(cache_path))
-                data_sources.append((ds, text_field))
+                data_sources.append((ds, field))
                 if _is_main():
                     print(f"  ✓ {path}/{name or ''}  ({cache_path})")
             except Exception as e:
@@ -190,56 +175,51 @@ class TextDataset(IterableDataset):
         self._tokenizer = tokenizer
 
     def __iter__(self):
-        sl = self.seq_len
-        chunk_size = 5000
-        rank = self.rank
-        world = self.world_size
-        buffer = []
-        slice_idx = rank  # each GPU starts at its rank offset
+        sl, rank, world, chunk_size = self.seq_len, self.rank, self.world_size, 5000
+        buffer, slice_idx = [], rank
 
         for ds, field in self._sources:
-            texts_batch = []
+            batch = []
             for sample in ds:
                 text = sample.get(field, "")
                 if text and text.strip():
-                    texts_batch.append(text)
-                if len(texts_batch) >= chunk_size:
-                    for ids in self._tokenizer(texts_batch, add_special_tokens=False).input_ids:
+                    batch.append(text)
+                if len(batch) >= chunk_size:
+                    for ids in self._tokenizer(batch, add_special_tokens=False).input_ids:
                         buffer.extend(ids)
-                    texts_batch = []
-                    # Yield slices for this GPU as they become available
+                    batch = []
                     while slice_idx * sl + sl <= len(buffer):
                         start = slice_idx * sl
                         yield torch.tensor(buffer[start:start + sl], dtype=torch.long).unsqueeze(0)
                         slice_idx += world
-            if texts_batch:
-                for ids in self._tokenizer(texts_batch, add_special_tokens=False).input_ids:
+            if batch:
+                for ids in self._tokenizer(batch, add_special_tokens=False).input_ids:
                     buffer.extend(ids)
 
-        # Wrap around: start over from the beginning
         total = len(buffer)
         while True:
             while slice_idx * sl + sl <= total:
                 start = slice_idx * sl
                 yield torch.tensor(buffer[start:start + sl], dtype=torch.long).unsqueeze(0)
                 slice_idx += world
-            slice_idx = slice_idx % total  # doesn't really wrap correctly, but good enough
             slice_idx = rank
-            wrapped = list(buffer)
 
 
 # ── Eval ────────────────────────────────────────────────────────────
 
 
 @torch.no_grad()
-def eval_step(trainer: MTCTrainer, input_ids: torch.Tensor) -> dict:
+def eval_step(trainer, input_ids):
     teacher = trainer._teacher_chunked(input_ids)
+    if trainer.decompressor is not None:
+        teacher = teacher[0]
+
     embeddings = trainer.base.get_input_embeddings()(input_ids).detach()
     compressed = trainer.chunker(embeddings)
-    student = trainer._student_forward(compressed, input_ids.shape[1])
+    student = trainer._student_forward(compressed, input_ids.shape[1])[0]
 
     loss = F.mse_loss(student, teacher)
     t_logits = trainer.base.lm_head(teacher[:, -1:, :])
     s_logits = trainer.base.lm_head(student[:, -1:, :])
     top1 = (t_logits.argmax(-1) == s_logits.argmax(-1)).float().mean().item()
-    return {"eval_loss": loss.item(), "eval_top1": top1}
+    return {"eval_loss": loss.item() / student.shape[-1], "eval_top1": top1}

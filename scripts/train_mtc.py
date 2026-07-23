@@ -20,6 +20,7 @@ from huggingface_hub import snapshot_download
 
 from configs import TrainConfig, qwen3_5_08b_mps, qwen3_6_27b_gpu, qwen3_5_08b_dgx
 from src.chunkers import build_chunker
+from src.kv_decompressor import KVDecompressor
 from src.trainer import MTCTrainer, TextDataset, eval_step
 
 PRESETS = {
@@ -87,7 +88,16 @@ def main():
     chunker = chunker.to(device=device, dtype=chunk_dtype)
     chunker.train()
 
-    trainer = MTCTrainer(base_model=model, chunker=chunker, chunk_size=cfg.chunk_size)
+    decompressor = None
+    if cfg.train_decompressor:
+        decompressor = KVDecompressor(model.config.hidden_size, cfg.chunk_size)
+        decompressor = decompressor.to(device=device, dtype=model.dtype)
+        decompressor.train()
+
+    trainer = MTCTrainer(
+        base_model=model, chunker=chunker, chunk_size=cfg.chunk_size,
+        decompressor=decompressor,
+    )
     trainer.optimizer.param_groups[0]["lr"] = cfg.lr
     trainer.optimizer.param_groups[0]["weight_decay"] = cfg.weight_decay
     trainer.scheduler.T_max = cfg.lr_scheduler_tmax
@@ -122,6 +132,7 @@ def main():
         print(f"  Lengths:   {all_lengths}")
 
     running_loss = 0.0
+    running_kv = 0.0
     running_top1 = 0.0
 
     if args.profile:
@@ -180,16 +191,19 @@ def main():
                     t_count += 1
 
                 avg_loss = running_loss / cfg.eval_every
+                avg_kv = running_kv / cfg.eval_every
                 avg_top1 = running_top1 / cfg.eval_every
+                kv_str = f" | kv:{avg_kv:.6f}" if cfg.train_decompressor else ""
                 print(
                     f"  Step {step+1:5d}/{cfg.steps} | "
                     f"len:{input_ids.shape[1]:5d} | "
-                    f"loss: {avg_loss:.6f} | "
+                    f"loss: {avg_loss:.6f}{kv_str} | "
                     f"top1: {avg_top1:.3f} | "
                     f"lr: {metrics['lr']:.4e}"
                 )
 
                 running_loss = 0.0
+                running_kv = 0.0
                 running_top1 = 0.0
 
                 eval_ids = tokenizer(
@@ -215,17 +229,17 @@ def main():
                     cfg.checkpoints_dir
                     / f"chunker_{cfg.chunker_type}_k{cfg.chunk_size}_step{step+1}.pt"
                 )
-                torch.save(
-                    {
-                        "step": step + 1,
-                        "chunker_state": accelerator.unwrap_model(chunker).state_dict(),
-                        "chunker_type": cfg.chunker_type,
-                        "chunk_size": cfg.chunk_size,
-                        "hidden_dim": model.config.hidden_size,
-                        "metrics": metrics,
-                    },
-                    ckpt_path,
-                )
+                save_dict = {
+                    "step": step + 1,
+                    "chunker_state": accelerator.unwrap_model(chunker).state_dict(),
+                    "chunker_type": cfg.chunker_type,
+                    "chunk_size": cfg.chunk_size,
+                    "hidden_dim": model.config.hidden_size,
+                    "metrics": metrics,
+                }
+                if cfg.train_decompressor:
+                    save_dict["decompressor_state"] = accelerator.unwrap_model(decompressor).state_dict()
+                torch.save(save_dict, ckpt_path)
                 print(f"           saved → {ckpt_path}")
 
                 if args.profile and t_count > 0:
