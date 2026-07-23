@@ -19,14 +19,16 @@ def compatible_position_ids(
     position_ids: torch.Tensor,
     chunk_size: int,
 ) -> torch.Tensor:
-    """
-    Map N position IDs → ceil(N/K) contiguous position IDs.
-    Uses [0, 1, 2, ...] for compatibility with standard generation.
-    """
+    """Map N positions → N/K using last position of each chunk (best quality)."""
     N = position_ids.shape[-1]
     K = chunk_size
-    n_compressed = N // K + (1 if N % K else 0)
-    return torch.arange(n_compressed, device=position_ids.device).unsqueeze(0)
+    n_full = N // K
+    pids = position_ids.squeeze(0)
+    compressed = pids[:n_full * K].view(-1, K)[:, -1]
+    remainder = N % K
+    if remainder:
+        compressed = torch.cat([compressed, pids[-remainder:][-1:]], dim=0)
+    return compressed.unsqueeze(0)
 
 
 class MTCModel(nn.Module):
