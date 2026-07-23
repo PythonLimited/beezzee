@@ -79,7 +79,7 @@ def main():
         chunk_size=K,
     )
     mtc.chunker.load_state_dict(ckpt["chunker_state"])
-    mtc.chunker = mtc.chunker.to(device)
+    mtc.chunker = mtc.chunker.to(device=device, dtype=model.dtype)
     mtc.chunker.eval()
 
     print(f"\n{'─'*72}")
