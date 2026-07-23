@@ -90,7 +90,9 @@ def main():
 
     decompressor = None
     if cfg.train_decompressor:
-        decompressor = KVDecompressor(model.config.hidden_size, cfg.chunk_size)
+        decompressor = KVDecompressor(
+            model.config.head_dim, cfg.chunk_size  # KV head dim, not hidden_size
+        )
         decompressor = decompressor.to(device=device, dtype=model.dtype)
         decompressor.train()
 
@@ -235,6 +237,7 @@ def main():
                     "chunker_type": cfg.chunker_type,
                     "chunk_size": cfg.chunk_size,
                     "hidden_dim": model.config.hidden_size,
+                    "kv_head_dim": model.config.head_dim,
                     "metrics": metrics,
                 }
                 if cfg.train_decompressor:

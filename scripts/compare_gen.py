@@ -50,7 +50,9 @@ def main():
     decompressor = None
     if decompressor_path and decompressor_path.exists():
         d_ckpt = torch.load(decompressor_path, map_location="cpu")
-        decompressor = KVDecompressor(d_ckpt["hidden_dim"], d_ckpt["chunk_size"])
+        decompressor = KVDecompressor(
+            d_ckpt.get("kv_head_dim", d_ckpt["hidden_dim"]), d_ckpt["chunk_size"]
+        )
         decompressor.load_state_dict(d_ckpt["decompressor_state"])
         decompressor = decompressor.to(device=device, dtype=dtype)
         decompressor.eval()
