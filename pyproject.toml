@@ -1,0 +1,12 @@
+[project]
+name = "mtc-explore"
+version = "0.1.0"
+description = "Multi-Token Consumption — prompt processing speedup exploration"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.10",
+    "transformers>=4.50",
+    "accelerate>=1.0",
+    "openai>=1.0",
+    "psutil",
+]
