@@ -17,12 +17,12 @@ class TrainConfig:
     chunk_size: int = 4                  # K tokens → 1 embedding
 
     # ── Training ──
-    steps: int = 5000
-    eval_every: int = 50
+    steps: int = 11000
+    eval_every: int = 100
     kl_temperature: float = 2.0
     lr: float = 1e-4
     weight_decay: float = 0.01
-    lr_scheduler_tmax: int = 5000
+    lr_scheduler_tmax: int = 10000
     grad_clip: float = 1.0
 
     # ── Data ──
@@ -31,15 +31,15 @@ class TrainConfig:
     # GPU/24GB: 32K-64K for 0.8B, less for 27B.
     length_schedule: dict[int, int] = field(default_factory=lambda: {
         0: 256,
-        500: 512,
-        1000: 1024,
-        1500: 2048,
-        2000: 4096,
-        2500: 8192,
-        3000: 16384,
-        3500: 32768,
-        4000: 65536,
-        4500: 131072,
+        1500: 512,
+        3000: 1024,
+        4500: 2048,
+        6000: 4096,
+        7500: 8192,
+        8500: 16384,
+        9500: 32768,
+        10200: 65536,
+        10700: 131072,
     })
 
     # ── Paths ──
@@ -73,9 +73,8 @@ qwen3_6_27b_gpu = TrainConfig(
     steps=10000,
     chunk_size=4,
     length_schedule={
-        0: 256, 1000: 512, 2000: 1024, 3000: 2048,
-        4000: 4096, 5000: 8192, 6000: 16384, 7000: 32768,
-        8000: 65536, 9000: 131072,
+        0: 256, 1500: 512, 3000: 1024, 4500: 2048,
+        6000: 4096, 7500: 8192, 8500: 16384, 9500: 32768,
     },
 )
 
@@ -84,11 +83,11 @@ qwen3_5_08b_dgx = TrainConfig(
     model_id="Qwen/Qwen3.5-0.8B-Base",
     dtype="bfloat16",
     attn_implementation="sdpa",
-    steps=5000,
+    steps=11000,
     chunk_size=4,
     length_schedule={
-        0: 256, 500: 512, 1000: 1024, 1500: 2048,
-        2000: 4096, 2500: 8192, 3000: 16384, 3500: 32768,
-        4000: 65536, 4500: 131072,
+        0: 256, 1500: 512, 3000: 1024, 4500: 2048,
+        6000: 4096, 7500: 8192, 8500: 16384, 9500: 32768,
+        10200: 65536, 10700: 131072,
     },
 )
