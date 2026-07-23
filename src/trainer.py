@@ -46,8 +46,9 @@ class MTCTrainer:
             p.requires_grad = False
 
         # Compile the model for faster no_grad forward passes
+        # "default" avoids CUDA graphs which conflict with multiple forward calls
         self._compiled_model = torch.compile(
-            self.base.model, mode="reduce-overhead", fullgraph=False
+            self.base.model, mode="default", fullgraph=False
         )
 
         params = list(self.chunker.parameters())
