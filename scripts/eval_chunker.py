@@ -91,9 +91,9 @@ def main():
     mtc.chunker = mtc.chunker.to(device=device, dtype=model.dtype)
     mtc.chunker.eval()
 
-    print(f"\n{'─'*90}")
-    print(f"  {'prompt':12s} {'tokens':>6s} {'→comp':>6s}  {'JS div':>10s}  {'cos':>6s}  top1  {'std':>6s}  {'mtc':>6s}  speedup")
-    print(f"{'─'*90}")
+    print(f"\n{'─'*85}")
+    print(f"  {'prompt':12s} | {'tokens':>6s} | {'→comp':>5s} | {'JS div':>10s} | {'cos':>6s} | top1 | {'std':>7s} | {'mtc':>7s} | speedup")
+    print(f"{'─'*85}")
 
     total, matched = 0, 0
 
@@ -143,9 +143,9 @@ def main():
             total += 1
 
             print(
-                f"  {flag} {label:11s} {N:6d} {comp:6d}  "
-                f"{div['js_divergence']:10.2e}  {div['cosine_sim']:6.4f}  "
-                f"{t_std*1000:6.0f}ms→{t_mtc*1000:6.0f}ms  ×{speedup:.1f}"
+                f"  {flag} {label:11s} | {N:6d} | {comp:5d} | "
+                f"{div['js_divergence']:10.2e} | {div['cosine_sim']:6.4f} | "
+                f"  {flag}  | {t_std*1000:6.0f}ms | {t_mtc*1000:6.0f}ms | ×{speedup:.1f}"
             )
 
             # Clear MPS memory between long runs
