@@ -119,6 +119,7 @@ def main():
         import time
         t_data = t_step = t_eval = 0.0
         t_count = 0
+        t_wall_start = time.perf_counter()
 
     for step in range(cfg.steps):
         if step in cfg.length_schedule:
@@ -228,13 +229,16 @@ def main():
                 print(f"           saved → {ckpt_path}")
 
                 if args.profile and t_count > 0:
-                    n = cfg.eval_every
+                    elapsed = time.perf_counter() - t_wall_start
+                    steps_done = step + 1
+                    steps_left = cfg.steps - steps_done
+                    sec_per_step = elapsed / steps_done
+                    eta = sec_per_step * steps_left
                     print(
-                        f"           ── profile ({t_count} evals, {n} steps each) ──\n"
-                        f"           data:  {t_data/t_count*1000:6.1f}ms/block\n"
-                        f"           step:  {t_step/t_count*1000:6.1f}ms/block  "
-                        f"({t_step/t_count/n*1000:.2f}ms/step)\n"
-                        f"           eval:  {t_eval/t_count*1000:6.1f}ms/eval"
+                        f"           ── elapsed: {elapsed/60:5.1f}m  "
+                        f"eta: {eta/60:5.1f}m  "
+                        f"step: {t_step/t_count*1000:6.0f}ms/block"
+                        f"  ({t_step/t_count/cfg.eval_every*1000:.1f}ms/step)"
                     )
 
     accelerator.wait_for_everyone()

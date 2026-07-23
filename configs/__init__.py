@@ -17,7 +17,7 @@ class TrainConfig:
     chunk_size: int = 4                  # K tokens → 1 embedding
 
     # ── Training ──
-    steps: int = 11000
+    steps: int = 13000
     eval_every: int = 100
     kl_temperature: float = 2.0
     lr: float = 1e-4
@@ -36,10 +36,10 @@ class TrainConfig:
         4500: 2048,
         6000: 4096,
         7500: 8192,
-        8500: 16384,
-        9500: 32768,
-        10200: 65536,
-        10700: 131072,
+        9000: 16384,
+        10500: 32768,
+        11500: 65536,
+        12500: 131072,
     })
 
     # ── Paths ──
@@ -83,11 +83,11 @@ qwen3_5_08b_dgx = TrainConfig(
     model_id="Qwen/Qwen3.5-0.8B-Base",
     dtype="bfloat16",
     attn_implementation="sdpa",
-    steps=11000,
+    steps=13000,
     chunk_size=4,
     length_schedule={
         0: 256, 1500: 512, 3000: 1024, 4500: 2048,
-        6000: 4096, 7500: 8192, 8500: 16384, 9500: 32768,
-        10200: 65536, 10700: 131072,
+        6000: 4096, 7500: 8192, 9000: 16384, 10500: 32768,
+        11500: 65536, 12500: 131072,
     },
 )
