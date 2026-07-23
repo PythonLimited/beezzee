@@ -92,8 +92,10 @@ def main():
 
     if accelerator.is_main_process:
         print(f"\nLoading training data (streaming, seq_len={seq_len}) ...")
-
-    dataset = TextDataset(tokenizer, seq_len=seq_len)
+    dataset = TextDataset(tokenizer, seq_len=seq_len)  # rank 0 downloads if needed
+    accelerator.wait_for_everyone()  # others wait for download to finish
+    if not accelerator.is_main_process:
+        dataset = TextDataset(tokenizer, seq_len=seq_len)  # now cache exists for all
 
     if accelerator.is_main_process:
         print(f"\n{'='*60}")
@@ -120,6 +122,9 @@ def main():
                 print(f"\n  ══ Seq len {seq_len} → {new_len}  (step {step}) ══\n")
             seq_len = new_len
             dataset = TextDataset(tokenizer, seq_len=new_len)
+            accelerator.wait_for_everyone()
+            if not accelerator.is_main_process:
+                dataset = TextDataset(tokenizer, seq_len=new_len)
             data_iter = iter(dataset)
 
         if args.profile:
@@ -128,7 +133,11 @@ def main():
         try:
             input_ids = next(data_iter).to(device)
         except StopIteration:
-            dataset = TextDataset(tokenizer, seq_len=seq_len)
+            if accelerator.is_main_process:
+                dataset = TextDataset(tokenizer, seq_len=seq_len)
+            accelerator.wait_for_everyone()
+            if not accelerator.is_main_process:
+                dataset = TextDataset(tokenizer, seq_len=seq_len)
             data_iter = iter(dataset)
             input_ids = next(data_iter).to(device)
 
