@@ -21,9 +21,7 @@ def compatible_position_ids(
 ) -> torch.Tensor:
     """
     Map N position IDs → N/K position IDs.
-    Uses the LAST position of each chunk (conservative — the chunk
-    can't attend to positions beyond its last original position).
-    For the remainder chunk (if N not divisible by K), uses its last position.
+    Uses the LAST position of each chunk (most semantically accurate).
     """
     N = position_ids.shape[-1]
     K = chunk_size
@@ -87,7 +85,11 @@ class MTCModel(nn.Module):
         return next(self.base.parameters()).device
 
     def prefill(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, DynamicCache]:
-        """Compressed prefill. Returns logits + cache ready for generation."""
+        """Compressed prefill. Returns logits + compressed cache for generation.
+
+        Unlike the old approach, we do NOT expand the cache — we keep it
+        compressed. During generation, the model attends to N/K compressed
+        prompt summaries + newly generated tokens at full resolution."""
         B, N = input_ids.shape
         K = self.chunk_size
 
@@ -105,24 +107,12 @@ class MTCModel(nn.Module):
                 past_key_values=None,
             )
 
-        compressed_cache: DynamicCache = outputs.past_key_values
-        expanded_cache = DynamicCache()
-
-        for layer_idx, layer in enumerate(compressed_cache.layers):
-            # Full-attention layers: decompress KV by repeating entries
-            if hasattr(layer, "keys") and hasattr(layer, "values"):
-                k_exp = self.chunker.decompress_kv(layer.keys)[:, :, :N, :]
-                v_exp = self.chunker.decompress_kv(layer.values)[:, :, :N, :]
-                expanded_cache.update(k_exp, v_exp, layer_idx)
-            else:
-                # Linear-attention: reuse recurrent state as-is
-                while len(expanded_cache.layers) <= layer_idx:
-                    expanded_cache.layers.append(None)
-                expanded_cache.layers[layer_idx] = layer
+        cache: DynamicCache = outputs.past_key_values
+        self._mtc_prompt_len = cache.get_seq_length()
 
         last_hidden = outputs.last_hidden_state[:, -1:, :]
         logits = self.base.lm_head(last_hidden)
-        return logits, expanded_cache
+        return logits, cache
 
     def standard_prefill(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, DynamicCache]:
         """Standard (uncompressed) prefill for comparison."""
