@@ -148,6 +148,9 @@ def main():
         seq_len = random.choice(available_lengths)
         data_iter = get_iter(seq_len)
 
+        if args.profile:
+            t0 = time.perf_counter()
+
         try:
             input_ids = next(data_iter).to(device)
         except StopIteration:
