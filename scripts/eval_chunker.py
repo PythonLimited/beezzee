@@ -173,14 +173,20 @@ def main():
     std_gen = mtc.generate_from_cache(gen_ids, std_cache, max_new_tokens=25)
     mtc_gen = mtc.generate_from_cache(gen_ids, mtc_cache, max_new_tokens=25)
 
+    # Token-level overlap: count matching tokens in first min(len) positions
+    min_len = min(std_gen.shape[1], mtc_gen.shape[1])
+    token_match = (std_gen[0, :min_len] == mtc_gen[0, :min_len]).sum().item()
+    n_tokens = min_len
+    first_match = std_gen[0, 0].item() == mtc_gen[0, 0].item() if min_len > 0 else False
+
     std_text = tokenizer.decode(std_gen[0], skip_special_tokens=True)
     mtc_text = tokenizer.decode(mtc_gen[0], skip_special_tokens=True)
 
-    print(f"\n  Generation ({gen_prompt})")
+    print(f"\n  ── Generation ──")
     print(f"  std:  {std_text}")
     print(f"  mtc:  {mtc_text}")
-    print(f"  match: {'✓ identical' if std_text == mtc_text else '✗ differs'}")
-    print()
+    print(f"  tok match:   {token_match}/{n_tokens}  ({100*token_match/max(1,n_tokens):.0f}%)")
+    print(f"  1st token:   {'✓' if first_match else '✗'}")
 
 
 if __name__ == "__main__":
