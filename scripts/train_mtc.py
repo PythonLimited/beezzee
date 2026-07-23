@@ -82,7 +82,9 @@ def main():
     model.eval()
 
     chunker = build_chunker(cfg.chunker_type, model.config.hidden_size, cfg.chunk_size)
-    chunker = chunker.to(device=device, dtype=model.dtype)
+    # fp32 chunker on MPS (fp16 gradients unstable), match model dtype on CUDA
+    chunk_dtype = torch.float32 if device.type == "mps" else model.dtype
+    chunker = chunker.to(device=device, dtype=chunk_dtype)
     chunker.train()
 
     trainer = MTCTrainer(base_model=model, chunker=chunker, chunk_size=cfg.chunk_size)

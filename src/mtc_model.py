@@ -90,12 +90,13 @@ class MTCModel(nn.Module):
         with torch.no_grad():
             embeddings = self.base.get_input_embeddings()(input_ids)
             compressed = self.chunker(embeddings)
+            model_dtype = next(self.base.parameters()).dtype
 
             pos_ids = torch.arange(N, device=input_ids.device).unsqueeze(0)
             pos_ids_compressed = compatible_position_ids(pos_ids, K)
 
             outputs = self.base.model(
-                inputs_embeds=compressed,
+                inputs_embeds=compressed.to(model_dtype),
                 position_ids=pos_ids_compressed,
                 use_cache=True,
                 past_key_values=None,

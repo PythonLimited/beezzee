@@ -95,7 +95,7 @@ class MTCTrainer:
         """Model forward on compressed embeddings → hidden states."""
         pos_ids = torch.arange(N, device=compressed.device).unsqueeze(0)
         pos_comp = compatible_position_ids(pos_ids, self.chunk_size)
-        return self._model_forward(compressed, pos_comp)
+        return self._model_forward(compressed.to(dtype=next(self.base.parameters()).dtype), pos_comp)
 
     def train_step(self, input_ids: torch.Tensor) -> dict:
         """Forward pass + loss. Caller must do backward() + optimizer.step()."""
@@ -116,7 +116,7 @@ class MTCTrainer:
 
         # Proxy loss: backprop through this gives same chunker grad as
         # straight-through estimator (dL/d(compressed) = grad_output)
-        proxy_loss = (compressed * grad_output.detach()).sum()
+        proxy_loss = (compressed * grad_output.to(compressed.dtype).detach()).sum()
 
         with torch.no_grad():
             t_logits = self.base.lm_head(teacher_hidden[:, -1:, :])
