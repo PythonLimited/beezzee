@@ -82,9 +82,9 @@ def main():
     mtc.chunker = mtc.chunker.to(device=device, dtype=model.dtype)
     mtc.chunker.eval()
 
-    print(f"\n{'─'*72}")
-    print(f"  {'prompt':12s} {'tokens':>6s} {'→comp':>6s}  {'JS div':>10s}  {'cos':>6s}  top1")
-    print(f"{'─'*72}")
+    print(f"\n{'─'*90}")
+    print(f"  {'prompt':12s} {'tokens':>6s} {'→comp':>6s}  {'JS div':>10s}  {'cos':>6s}  top1  {'std':>6s}  {'mtc':>6s}  speedup")
+    print(f"{'─'*90}")
 
     total, matched = 0, 0
 
@@ -96,9 +96,32 @@ def main():
             comp = N // K + (1 if N % K else 0)
 
             try:
+                import time
+
+                # Warmup
+                with torch.no_grad():
+                    _ = mtc.standard_prefill(input_ids)
+                    _ = mtc.prefill(input_ids)
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+
+                # Time standard prefill
+                t0 = time.perf_counter()
                 with torch.no_grad():
                     std_logits, _ = mtc.standard_prefill(input_ids)
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                t_std = time.perf_counter() - t0
+
+                # Time MTC prefill
+                t0 = time.perf_counter()
+                with torch.no_grad():
                     mtc_logits, _ = mtc.prefill(input_ids)
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                t_mtc = time.perf_counter() - t0
+
+                speedup = t_std / t_mtc if t_mtc > 0 else 0
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
                     print(f"  {'':>72s}  ← OOM, skipping {label} at len {target}")
@@ -112,7 +135,8 @@ def main():
 
             print(
                 f"  {flag} {label:11s} {N:6d} {comp:6d}  "
-                f"{div['js_divergence']:10.2e}  {div['cosine_sim']:6.4f}"
+                f"{div['js_divergence']:10.2e}  {div['cosine_sim']:6.4f}  "
+                f"{t_std*1000:6.0f}ms→{t_mtc*1000:6.0f}ms  ×{speedup:.1f}"
             )
 
             # Clear MPS memory between long runs
