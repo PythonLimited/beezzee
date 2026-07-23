@@ -52,7 +52,13 @@ def main():
     cfg = PRESETS.get(args.config, TrainConfig())
 
     accelerator = Accelerator(mixed_precision="bf16" if cfg.dtype == "bfloat16" else "no")
-    device = accelerator.device
+    # Accelerator only knows CUDA/CPU — handle MPS manually
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = accelerator.device
 
     if accelerator.is_main_process:
         print(f"Device: {device}")
