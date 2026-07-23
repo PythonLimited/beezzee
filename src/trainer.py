@@ -87,38 +87,37 @@ class MTCTrainer:
         return self._model_forward(compressed, pos_comp)
 
     def train_step(self, input_ids: torch.Tensor) -> dict:
+        """Forward pass + loss. Caller must do backward() + optimizer.step()."""
         B, N = input_ids.shape
         K = self.chunk_size
-        dtype = next(self.base.parameters()).dtype
 
         # 1. Teacher target (no grad)
         teacher_hidden = self._teacher_chunked(input_ids)
 
-        # 2. Student: chunker forward (WITH grad), then model forward (no grad)
+        # 2. Student: chunker forward, model forward (no grad)
         embeddings = self.base.get_input_embeddings()(input_ids).detach()
         compressed = self.chunker(embeddings)
         student_hidden = self._student_forward(compressed, N)
 
-        # 3. MSE loss
+        # 3. MSE loss + straight-through proxy
         loss = F.mse_loss(student_hidden, teacher_hidden)
-
-        # 4. Straight-through: use loss gradient at hidden states as
-        #    proxy gradient for chunker output (≈ identity Jacobian through model)
         grad_output = (student_hidden - teacher_hidden) * (2.0 / student_hidden.numel())
 
-        # 5. Backprop through chunker only
-        self.optimizer.zero_grad()
-        compressed.backward(gradient=grad_output)
-        nn.utils.clip_grad_norm_(self.chunker.parameters(), 1.0)
-        self.optimizer.step()
-        self.scheduler.step()
+        # Proxy loss: backprop through this gives same chunker grad as
+        # straight-through estimator (dL/d(compressed) = grad_output)
+        proxy_loss = (compressed * grad_output.detach()).sum()
 
         with torch.no_grad():
             t_logits = self.base.lm_head(teacher_hidden[:, -1:, :])
             s_logits = self.base.lm_head(student_hidden[:, -1:, :])
             top1 = (t_logits.argmax(-1) == s_logits.argmax(-1)).float().mean().item()
 
-        return {"loss": loss.item(), "top1_match": top1, "lr": self.scheduler.get_last_lr()[0]}
+        return {
+            "loss": loss.item(),
+            "top1_match": top1,
+            "lr": self.scheduler.get_last_lr()[0],
+            "_proxy_loss": proxy_loss,
+        }
 
 
 # ── Data ────────────────────────────────────────────────────────────
