@@ -82,6 +82,7 @@ def main():
     trainer.optimizer.param_groups[0]["lr"] = cfg.lr
     trainer.optimizer.param_groups[0]["weight_decay"] = cfg.weight_decay
     trainer.scheduler.T_max = cfg.lr_scheduler_tmax
+    cfg.checkpoints_dir.mkdir(exist_ok=True)
 
     # Prepare for multi-GPU: optimizer + scheduler synced across GPUs
     trainer.optimizer, trainer.scheduler = accelerator.prepare(

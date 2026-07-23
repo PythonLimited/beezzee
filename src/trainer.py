@@ -19,6 +19,16 @@ from torch.utils.data import IterableDataset
 from src.mtc_model import compatible_position_ids
 
 
+def _is_main():
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized():
+            return dist.get_rank() == 0
+    except Exception:
+        pass
+    return True
+
+
 class MTCTrainer:
     """
     Trains only the chunker via a straight-through estimator.
@@ -156,8 +166,9 @@ class TextDataset(IterableDataset):
                 if cache_path.exists():
                     ds = load_from_disk(str(cache_path))
                 else:
-                    label = f"{path}/{name or ''}" + (f" ({fraction})" if fraction else "")
-                    print(f"  Downloading {label} → {cache_path} ...")
+                    if _is_main():
+                        label = f"{path}/{name or ''}" + (f" ({fraction})" if fraction else "")
+                        print(f"  Downloading {label} → {cache_path} ...")
                     ds_split = f"{split}[{fraction}]" if fraction else split
                     if name:
                         ds = load_dataset(path, name, split=ds_split)
@@ -165,9 +176,11 @@ class TextDataset(IterableDataset):
                         ds = load_dataset(path, split=ds_split)
                     ds.save_to_disk(str(cache_path))
                 data_sources.append((ds, text_field))
-                print(f"  ✓ {path}/{name or ''}  ({cache_path})")
+                if _is_main():
+                    print(f"  ✓ {path}/{name or ''}  ({cache_path})")
             except Exception as e:
-                print(f"  ✗ {path}/{name or ''}: {e}")
+                if _is_main():
+                    print(f"  ✗ {path}/{name or ''}: {e}")
 
         self._sources = data_sources
         self._tokenizer = tokenizer
