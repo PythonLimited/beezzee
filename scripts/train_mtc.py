@@ -70,8 +70,9 @@ def main():
         str(cfg.local_model_dir),
         dtype=getattr(torch, cfg.dtype),
         attn_implementation=cfg.attn_implementation,
-        device_map={"": device},
+        low_cpu_mem_usage=True,
     )
+    model = model.to(device)
     model.eval()
 
     chunker = build_chunker(cfg.chunker_type, model.config.hidden_size, cfg.chunk_size)
