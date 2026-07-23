@@ -1,15 +1,42 @@
-"""
-Multi-Token Consumption (MTC) — prompt processing speedup.
-
-Strategy: compress N prompt token embeddings → N/K embeddings via learned
-chunking, run transformer at reduced length, decompress KV cache for
-standard autoregressive generation.
-"""
+from __future__ import annotations
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Literal
+
+
+def _interp_decompress(kv: torch.Tensor, chunk_size: int, N: int = None) -> torch.Tensor:
+    """
+    Expand compressed KV by interpolating between adjacent anchors.
+
+    Instead of naive repeating (causes attention collapse), each decompressed
+    position gets a unique KV value via linear interpolation between its two
+    nearest compressed anchors. This preserves smooth attention patterns.
+    """
+    B, H, C, D = kv.shape
+    K = chunk_size
+    N = N or C * K
+
+    expanded = torch.zeros(B, H, N, D, device=kv.device, dtype=kv.dtype)
+
+    for i in range(N):
+        c = i // K
+        offset = i % K
+
+        if c == 0:
+            if C > 1:
+                t = offset / K
+                expanded[:, :, i, :] = (1 - t) * kv[:, :, 0, :] + t * kv[:, :, 1, :]
+            else:
+                expanded[:, :, i, :] = kv[:, :, 0, :]
+        elif c >= C:
+            expanded[:, :, i, :] = kv[:, :, -1, :]
+        else:
+            t = (offset + 1) / (K + 1)
+            expanded[:, :, i, :] = (1 - t) * kv[:, :, c - 1, :] + t * kv[:, :, c, :]
+
+    return expanded
 
 
 class MeanChunk(nn.Module):
@@ -28,9 +55,8 @@ class MeanChunk(nn.Module):
         return x.view(B, -1, K, D).mean(dim=2)
 
     def decompress_kv(self, kv: torch.Tensor) -> torch.Tensor:
-        """Expand compressed KV entries by repeating each K times."""
-        B, H, compressed_len, D = kv.shape
-        return kv.repeat_interleave(self.chunk_size, dim=2)
+        """Interpolate between compressed anchors for smooth decompression."""
+        return _interp_decompress(kv, self.chunk_size)
 
 
 class AttnChunk(nn.Module):
