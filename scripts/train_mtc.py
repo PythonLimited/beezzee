@@ -185,7 +185,7 @@ def main():
                     f"  Step {step+1:5d}/{cfg.steps} | "
                     f"loss: {avg_loss:.6f} | "
                     f"top1: {avg_top1:.3f} | "
-                    f"lr: {metrics['lr']:.2e}"
+                    f"lr: {metrics['lr']:.4e}"
                 )
 
                 running_loss = 0.0
