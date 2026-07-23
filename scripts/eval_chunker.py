@@ -91,9 +91,9 @@ def main():
     mtc.chunker = mtc.chunker.to(device=device, dtype=model.dtype)
     mtc.chunker.eval()
 
-    print(f"\n{'─'*85}")
-    print(f"  {'prompt':12s} | {'tokens':>6s} | {'→comp':>5s} | {'JS div':>10s} | {'cos':>6s} | top1 | {'std':>7s} | {'mtc':>7s} | speedup")
-    print(f"{'─'*85}")
+    print(f"\n{'─'*78}")
+    print(f"  {'prompt':12s} | {'N':>5s}→{'N/K':>4s} | {'JS':>8s} | {'cos':>5s} | {'top1':>4s} | {'std':>7s} | {'mtc':>7s} |  ×")
+    print(f"{'─'*78}")
 
     total, matched = 0, 0
 
@@ -142,10 +142,25 @@ def main():
             matched += int(div["top1_match"])
             total += 1
 
+            js = div['js_divergence']
+            if js < 1e-5:
+                js_str = f"\033[32m{js:.1e}\033[0m"   # green = great
+            elif js < 1e-4:
+                js_str = f"\033[33m{js:.1e}\033[0m"   # yellow = ok
+            else:
+                js_str = f"\033[31m{js:.1e}\033[0m"   # red = poor
+
+            cos = div['cosine_sim']
+            if cos > 0.3:
+                cos_str = f"\033[32m{cos:.3f}\033[0m"
+            elif cos > 0.1:
+                cos_str = f"\033[33m{cos:.3f}\033[0m"
+            else:
+                cos_str = f"\033[31m{cos:.3f}\033[0m"
+
             print(
-                f"  {flag} {label:11s} | {N:6d} | {comp:5d} | "
-                f"{div['js_divergence']:10.2e} | {div['cosine_sim']:6.4f} | "
-                f"  {flag}  | {t_std*1000:6.0f}ms | {t_mtc*1000:6.0f}ms | ×{speedup:.1f}"
+                f"  {flag} {label:11s} | {N:5d}→{comp:4d} | {js_str} | {cos_str} |"
+                f"  {flag:>3s} | {t_std*1000:6.0f}ms | {t_mtc*1000:6.0f}ms | ×{speedup:.1f}"
             )
 
             # Clear MPS memory between long runs
