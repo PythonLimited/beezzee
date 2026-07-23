@@ -93,26 +93,13 @@ def main():
     trainer.scheduler.T_max = cfg.lr_scheduler_tmax
     cfg.checkpoints_dir.mkdir(exist_ok=True)
 
-    # Dataset pool: randomly sample from all seen lengths to prevent forgetting
+    # Pool: all lengths up to the current milestone (anti-forgetting + memory-safe)
     import random
-    pool_lengths = sorted(cfg.length_schedule.values())
-    datasets: dict[int, TextDataset] = {}
-    data_iters: dict[int, any] = {}
-
-    def get_iter(seq_len):
-        if seq_len not in datasets:
-            datasets[seq_len] = TextDataset(
-                tokenizer, seq_len=seq_len,
-                rank=accelerator.process_index,
-                world_size=accelerator.num_processes,
-            )
-        if seq_len not in data_iters:
-            data_iters[seq_len] = iter(datasets[seq_len])
-        return data_iters[seq_len]
-
-    # Track which lengths are available at each step
-    length_milestones = sorted(cfg.length_schedule.items())  # [(step, length), ...]
-    available_lengths = [pool_lengths[0]]  # start with smallest
+    all_lengths = sorted(set(cfg.length_schedule.values()))
+    length_milestones = sorted(cfg.length_schedule.items())  # [(step, max_length), ...]
+    milestone_idx = 0
+    max_len = length_milestones[0][1]
+    available_lengths = [l for l in all_lengths if l <= max_len]
 
     if accelerator.is_main_process:
         print(f"\n{'='*60}")
@@ -125,7 +112,6 @@ def main():
 
     running_loss = 0.0
     running_top1 = 0.0
-    milestone_idx = 0
 
     if args.profile:
         import time
@@ -134,14 +120,13 @@ def main():
         t_wall_start = time.perf_counter()
 
     for step in range(cfg.steps):
-        # Add new lengths to the pool at milestone steps
+        # Expand available lengths at milestone steps
         while (milestone_idx < len(length_milestones) and
                step >= length_milestones[milestone_idx][0]):
-            new_len = length_milestones[milestone_idx][1]
-            if new_len not in available_lengths:
-                available_lengths.append(new_len)
-                if accelerator.is_main_process:
-                    print(f"\n  ══ +{new_len} tokens (now {len(available_lengths)} lengths in pool, step {step}) ══\n")
+            max_len = length_milestones[milestone_idx][1]
+            available_lengths = sorted(set(available_lengths + [max_len]))
+            if accelerator.is_main_process and milestone_idx > 0:
+                print(f"\n  ══ +{max_len} tokens (now {len(available_lengths)} lengths, step {step}) ══\n")
             milestone_idx += 1
 
         # Randomly pick a length from available pool
