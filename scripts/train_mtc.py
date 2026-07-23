@@ -93,36 +93,39 @@ def main():
     trainer.scheduler.T_max = cfg.lr_scheduler_tmax
     cfg.checkpoints_dir.mkdir(exist_ok=True)
 
-    # Prepare for multi-GPU: optimizer + scheduler synced across GPUs
-    trainer.optimizer, trainer.scheduler = accelerator.prepare(
-        trainer.optimizer, trainer.scheduler
-    )
+    # Dataset pool: randomly sample from all seen lengths to prevent forgetting
+    import random
+    pool_lengths = sorted(cfg.length_schedule.values())
+    datasets: dict[int, TextDataset] = {}
+    data_iters: dict[int, any] = {}
 
-    seq_len = cfg.length_schedule[0]
+    def get_iter(seq_len):
+        if seq_len not in datasets:
+            datasets[seq_len] = TextDataset(
+                tokenizer, seq_len=seq_len,
+                rank=accelerator.process_index,
+                world_size=accelerator.num_processes,
+            )
+        if seq_len not in data_iters:
+            data_iters[seq_len] = iter(datasets[seq_len])
+        return data_iters[seq_len]
 
-    if accelerator.is_main_process:
-        print(f"\nLoading training data (streaming, seq_len={seq_len}) ...")
-    dataset = TextDataset(tokenizer, seq_len=seq_len,
-                          rank=accelerator.process_index,
-                          world_size=accelerator.num_processes)
-    accelerator.wait_for_everyone()
-    if not accelerator.is_main_process:
-        dataset = TextDataset(tokenizer, seq_len=seq_len,
-                              rank=accelerator.process_index,
-                              world_size=accelerator.num_processes)
+    # Track which lengths are available at each step
+    length_milestones = sorted(cfg.length_schedule.items())  # [(step, length), ...]
+    available_lengths = [pool_lengths[0]]  # start with smallest
 
     if accelerator.is_main_process:
         print(f"\n{'='*60}")
         print(f"  Chunker:   {cfg.chunker_type}, K={cfg.chunk_size}")
         print(f"  Params:    {sum(p.numel() for p in chunker.parameters()):,}")
         print(f"  Steps:     {cfg.steps}")
-        print(f"  Schedule:  {dict(sorted(cfg.length_schedule.items()))}")
-        print(f"  Checkpoints → {cfg.checkpoints_dir}/")
+        print(f"  Lengths:   {pool_lengths} (added progressively)")
+        print(f"  Sampling:  random from available lengths")
         print(f"{'='*60}\n")
 
     running_loss = 0.0
     running_top1 = 0.0
-    data_iter = iter(dataset)
+    milestone_idx = 0
 
     if args.profile:
         import time
@@ -131,37 +134,25 @@ def main():
         t_wall_start = time.perf_counter()
 
     for step in range(cfg.steps):
-        if step in cfg.length_schedule:
-            new_len = cfg.length_schedule[step]
-            if accelerator.is_main_process:
-                print(f"\n  ══ Seq len {seq_len} → {new_len}  (step {step}) ══\n")
-            seq_len = new_len
-            dataset = TextDataset(tokenizer, seq_len=new_len,
-                                  rank=accelerator.process_index,
-                                  world_size=accelerator.num_processes)
-            accelerator.wait_for_everyone()
-            if not accelerator.is_main_process:
-                dataset = TextDataset(tokenizer, seq_len=new_len,
-                                      rank=accelerator.process_index,
-                                      world_size=accelerator.num_processes)
-            data_iter = iter(dataset)
+        # Add new lengths to the pool at milestone steps
+        while (milestone_idx < len(length_milestones) and
+               step >= length_milestones[milestone_idx][0]):
+            new_len = length_milestones[milestone_idx][1]
+            if new_len not in available_lengths:
+                available_lengths.append(new_len)
+                if accelerator.is_main_process:
+                    print(f"\n  ══ +{new_len} tokens (now {len(available_lengths)} lengths in pool, step {step}) ══\n")
+            milestone_idx += 1
 
-        if args.profile:
-            t0 = time.perf_counter()
+        # Randomly pick a length from available pool
+        seq_len = random.choice(available_lengths)
+        data_iter = get_iter(seq_len)
 
         try:
             input_ids = next(data_iter).to(device)
         except StopIteration:
-            if accelerator.is_main_process:
-                dataset = TextDataset(tokenizer, seq_len=seq_len,
-                                      rank=accelerator.process_index,
-                                      world_size=accelerator.num_processes)
-            accelerator.wait_for_everyone()
-            if not accelerator.is_main_process:
-                dataset = TextDataset(tokenizer, seq_len=seq_len,
-                                      rank=accelerator.process_index,
-                                      world_size=accelerator.num_processes)
-            data_iter = iter(dataset)
+            data_iters.pop(seq_len, None)
+            data_iter = get_iter(seq_len)
             input_ids = next(data_iter).to(device)
 
         if args.profile:
