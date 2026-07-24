@@ -43,6 +43,16 @@ class KVDecompressorTrainer:
         for p in self.chunker.parameters():
             p.requires_grad = False
 
+        try:
+            layer_types = base_model.config.layer_types
+            self._full_attention_layers = {i for i, t in enumerate(layer_types) if t == "full_attention"}
+        except AttributeError:
+            try:
+                layer_types = base_model.config.text_config.layer_types
+                self._full_attention_layers = {i for i, t in enumerate(layer_types) if t == "full_attention"}
+            except AttributeError:
+                self._full_attention_layers = set(range(base_model.config.num_hidden_layers))
+
         # Compile model for faster forward passes
         self._compiled_model = torch.compile(
             self.base.model, mode="default", fullgraph=False
@@ -61,8 +71,11 @@ class KVDecompressorTrainer:
         return out.last_hidden_state, out.past_key_values
 
     def train_step(self, input_ids: torch.Tensor) -> dict:
-        B, N = input_ids.shape
+        B, N_full = input_ids.shape
         K = self.chunk_size
+        n_full = N_full // K
+        N = n_full * K
+        input_ids = input_ids[:, :N]
         dtype = next(self.base.parameters()).dtype
         device = input_ids.device
 
@@ -84,6 +97,8 @@ class KVDecompressorTrainer:
         for layer_idx, (comp_layer, gt_layer) in enumerate(
             zip(comp_cache.layers, gt_cache.layers)
         ):
+            if layer_idx not in self._full_attention_layers:
+                continue
             if not (hasattr(comp_layer, "keys") and hasattr(gt_layer, "keys")):
                 continue
             if not (hasattr(comp_layer, "values") and hasattr(gt_layer, "values")):

@@ -62,6 +62,16 @@ class MTCModel(nn.Module):
         self.chunker = build_chunker(chunk_name, self.hidden_dim, chunk_size)
         self.decompressor = decompressor
 
+        try:
+            layer_types = base_model.config.layer_types
+            self._full_attention_layers = {i for i, t in enumerate(layer_types) if t == "full_attention"}
+        except AttributeError:
+            try:
+                layer_types = base_model.config.text_config.layer_types
+                self._full_attention_layers = {i for i, t in enumerate(layer_types) if t == "full_attention"}
+            except AttributeError:
+                self._full_attention_layers = set(range(base_model.config.num_hidden_layers))
+
         self.base.eval()
         for p in self.base.parameters():
             p.requires_grad = False
@@ -84,12 +94,16 @@ class MTCModel(nn.Module):
         return next(self.base.parameters()).device
 
     def prefill(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, DynamicCache]:
-        """Compressed prefill using contiguous positions.
+        """Compressed prefill using last-position-of-chunk position IDs.
 
-        The cache has N/K entries at positions [0, 1, 2, ...].
-        Generation works natively — no decompression needed."""
-        B, N = input_ids.shape
+        The cache initially has N/K entries at positions [K-1, 2K-1, ...].
+        If a decompressor is provided, full-attention layers are expanded
+        to N entries for standard autoregressive generation from position N."""
+        B, N_full = input_ids.shape
         K = self.chunk_size
+        n_full = N_full // K
+        N = n_full * K
+        input_ids = input_ids[:, :N]
 
         with torch.no_grad():
             embeddings = self.base.get_input_embeddings()(input_ids)
@@ -112,13 +126,15 @@ class MTCModel(nn.Module):
         if self.decompressor is not None:
             expanded = DynamicCache()
             for layer_idx, layer in enumerate(cache.layers):
-                if hasattr(layer, "keys") and hasattr(layer, "values"):
+                while len(expanded.layers) <= layer_idx:
+                    expanded.layers.append(None)
+                if layer_idx not in self._full_attention_layers:
+                    expanded.layers[layer_idx] = layer
+                elif hasattr(layer, "keys") and hasattr(layer, "values"):
                     k_exp = self.decompressor(layer.keys)[:, :, :N, :]
                     v_exp = self.decompressor(layer.values)[:, :, :N, :]
                     expanded.update(k_exp, v_exp, layer_idx)
                 else:
-                    while len(expanded.layers) <= layer_idx:
-                        expanded.layers.append(None)
                     expanded.layers[layer_idx] = layer
             cache = expanded
 

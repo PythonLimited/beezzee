@@ -29,12 +29,10 @@ class TrainConfig:
     grad_clip: float = 1.0
 
     # ── Data ──
-    # Progressive sequence length → ramp toward max model context (262K).
-    # MPS/16GB: ~16K is the practical limit for 0.8B.
-    # GPU/24GB: 32K-64K for 0.8B, less for 27B.
     length_schedule: dict[int, int] = field(default_factory=lambda: {
         0: 256, 2000: 512, 4000: 1024, 6000: 2048,
         8000: 4096, 10000: 8192, 11500: 16384, 13000: 32768,
+        14000: 65536, 14500: 131072,
     })
 
     # ── Paths ──
@@ -64,12 +62,13 @@ qwen3_5_08b_mps = TrainConfig(
 qwen3_6_27b_gpu = TrainConfig(
     model_id="Qwen/Qwen3.6-27B-FP8",
     dtype="bfloat16",
-    attn_implementation="sdpa",
+    attn_implementation="flash_attention_2",
     steps=14000,
     chunk_size=4,
     length_schedule={
         0: 256, 2000: 512, 4000: 1024, 6000: 2048,
         8000: 4096, 10000: 8192, 11500: 16384, 13000: 32768,
+        14000: 65536, 14500: 131072,
     },
 )
 
@@ -77,11 +76,12 @@ qwen3_6_27b_gpu = TrainConfig(
 qwen3_5_08b_dgx = TrainConfig(
     model_id="Qwen/Qwen3.5-0.8B-Base",
     dtype="bfloat16",
-    attn_implementation="sdpa",
+    attn_implementation="flash_attention_2",
     steps=14500,
     chunk_size=4,
     length_schedule={
         0: 256, 2000: 512, 4000: 1024, 6000: 2048,
         8000: 4096, 10000: 8192, 11500: 16384, 13000: 32768,
+        14000: 65536, 14500: 131072,
     },
 )

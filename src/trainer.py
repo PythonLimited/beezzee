@@ -33,6 +33,7 @@ class MTCTrainer:
         chunker: nn.Module,
         chunk_size: int = 4,
         decompressor: nn.Module = None,
+        use_gradient_checkpointing: bool = False,
     ):
         self.base = base_model
         self.chunker = chunker
@@ -43,7 +44,22 @@ class MTCTrainer:
         for p in self.base.parameters():
             p.requires_grad = False
 
-        self._compiled_model = torch.compile(self.base.model, mode="default", fullgraph=False)
+        try:
+            layer_types = base_model.config.layer_types
+            self._full_attention_layers = {i for i, t in enumerate(layer_types) if t == "full_attention"}
+        except AttributeError:
+            try:
+                layer_types = base_model.config.text_config.layer_types
+                self._full_attention_layers = {i for i, t in enumerate(layer_types) if t == "full_attention"}
+            except AttributeError:
+                self._full_attention_layers = set(range(base_model.config.num_hidden_layers))
+
+        if use_gradient_checkpointing and hasattr(self.base, 'gradient_checkpointing_enable'):
+            self.base.gradient_checkpointing_enable()
+
+        self._compiled = not use_gradient_checkpointing
+        if self._compiled:
+            self._compiled_model = torch.compile(self.base.model, mode="default", fullgraph=False)
 
         params = list(self.chunker.parameters())
         if decompressor is not None:
@@ -58,7 +74,8 @@ class MTCTrainer:
 
     @torch.no_grad()
     def _model(self, embeds, pos_ids, use_cache=False):
-        out = self._compiled_model(inputs_embeds=embeds, position_ids=pos_ids, use_cache=use_cache)
+        model = self._compiled_model if self._compiled else self.base.model
+        out = model(inputs_embeds=embeds, position_ids=pos_ids, use_cache=use_cache)
         return out.last_hidden_state, out.past_key_values
 
     @torch.no_grad()
@@ -71,8 +88,6 @@ class MTCTrainer:
 
         n_full = N // K
         chunked = full[:, :n_full * K, :].view(B, n_full, K, -1)[:, :, -1, :]
-        if N % K:
-            chunked = torch.cat([chunked, full[:, -1:, :]], dim=1)
         return (chunked, kv) if self.decompressor is not None else chunked
 
     @torch.no_grad()
@@ -83,8 +98,11 @@ class MTCTrainer:
         return self._model(compressed.to(dtype), pos_c, use_cache=self.decompressor is not None)
 
     def train_step(self, input_ids):
-        B, N = input_ids.shape
+        B, N_full = input_ids.shape
         K = self.chunk_size
+        n_full = N_full // K
+        N = n_full * K
+        input_ids = input_ids[:, :N]
 
         # Teacher
         if self.decompressor is not None:
@@ -102,13 +120,17 @@ class MTCTrainer:
         grad_output = (student_hidden - teacher_hidden) * (2.0 / student_hidden.numel())
         proxy_loss = (compressed * grad_output.to(compressed.dtype).detach()).sum()
 
-        # Decompressor loss: MSE on KV caches (tensor for backward, float for monitoring)
+        # Decompressor loss: MSE on KV caches (full-attention layers only)
         loss_kv = 0.0
         loss_kv_tensor = None
         n_layers = 0
         if self.decompressor is not None:
             loss_kv_tensor = torch.tensor(0.0, device=input_ids.device)
-            for comp_layer, gt_layer in zip(student_kv.layers, teacher_kv.layers):
+            for layer_idx, (comp_layer, gt_layer) in enumerate(
+                zip(student_kv.layers, teacher_kv.layers)
+            ):
+                if layer_idx not in self._full_attention_layers:
+                    continue
                 if not (hasattr(comp_layer, "keys") and hasattr(gt_layer, "keys")):
                     continue
                 if not hasattr(comp_layer, "values") or not hasattr(gt_layer, "values"):
@@ -127,7 +149,7 @@ class MTCTrainer:
         # Combined proxy: chunker (always) + optional decompressor
         combined_proxy = proxy_loss
         if loss_kv_tensor is not None:
-            combined_proxy = proxy_loss + 0.01 * loss_kv_tensor
+            combined_proxy = proxy_loss + 0.1 * loss_kv_tensor
 
         # Top-1 monitoring
         with torch.no_grad():
@@ -224,13 +246,18 @@ class TextDataset(IterableDataset):
 
 @torch.no_grad()
 def eval_step(trainer, input_ids):
+    N_full = input_ids.shape[1]
+    K = trainer.chunk_size
+    N = (N_full // K) * K
+    input_ids = input_ids[:, :N]
+
     teacher = trainer._teacher_chunked(input_ids)
     if trainer.decompressor is not None:
         teacher = teacher[0]
 
     embeddings = trainer.base.get_input_embeddings()(input_ids).detach()
     compressed = trainer.chunker(embeddings)
-    student = trainer._student_forward(compressed, input_ids.shape[1])[0]
+    student = trainer._student_forward(compressed, N)[0]
 
     loss = F.mse_loss(student, teacher)
     t_logits = trainer.base.lm_head(teacher[:, -1:, :])

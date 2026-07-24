@@ -51,6 +51,16 @@ def main():
     decompressor = KVDecompressor(head_dim, K, depth=5).to(device=device, dtype=model.dtype)
     decompressor.train()
 
+    try:
+        layer_types = model.config.layer_types
+        full_attention_layers = {i for i, t in enumerate(layer_types) if t == "full_attention"}
+    except AttributeError:
+        try:
+            layer_types = model.config.text_config.layer_types
+            full_attention_layers = {i for i, t in enumerate(layer_types) if t == "full_attention"}
+        except AttributeError:
+            full_attention_layers = set(range(model.config.num_hidden_layers))
+
     optimizer = torch.optim.AdamW(decompressor.parameters(), lr=1e-3, weight_decay=0.01)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10000, eta_min=1e-5)
 
@@ -76,7 +86,9 @@ def main():
             data_iter = iter(dataset)
             input_ids = next(data_iter).to(device)
 
-        B, N = input_ids.shape
+        B, N_full = input_ids.shape
+        N = (N_full // K) * K
+        input_ids = input_ids[:, :N]
         dtype = next(model.parameters()).dtype
 
         # Ground truth: full prefill → KV
@@ -95,7 +107,11 @@ def main():
         # Decompress and compute MSE for each full-attention layer
         loss = torch.tensor(0.0, device=device)
         n_layers = 0
-        for comp_layer, gt_layer in zip(comp_cache.layers, gt_cache.layers):
+        for layer_idx, (comp_layer, gt_layer) in enumerate(
+            zip(comp_cache.layers, gt_cache.layers)
+        ):
+            if layer_idx not in full_attention_layers:
+                continue
             if not (hasattr(comp_layer, "keys") and hasattr(gt_layer, "keys")):
                 continue
             if not hasattr(comp_layer, "values") or not hasattr(gt_layer, "values"):

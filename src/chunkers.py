@@ -40,8 +40,6 @@ def _interp_decompress(kv: torch.Tensor, chunk_size: int, N: int = None) -> torc
 
 
 class MeanChunk(nn.Module):
-    """Mean-pool every K embeddings. No params — baseline."""
-
     def __init__(self, chunk_size: int):
         super().__init__()
         self.chunk_size = chunk_size
@@ -49,9 +47,8 @@ class MeanChunk(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, D = x.shape
         K = self.chunk_size
-        if N % K != 0:
-            pad = K - (N % K)
-            x = F.pad(x, (0, 0, 0, pad), mode="replicate")
+        n_full = N // K
+        x = x[:, :n_full * K, :]
         return x.view(B, -1, K, D).mean(dim=2)
 
     def decompress_kv(self, kv: torch.Tensor) -> torch.Tensor:
@@ -60,8 +57,6 @@ class MeanChunk(nn.Module):
 
 
 class AttnChunk(nn.Module):
-    """Learnable attention-pooling: learns a query that attends over K tokens."""
-
     def __init__(self, dim: int, chunk_size: int):
         super().__init__()
         self.chunk_size = chunk_size
@@ -71,9 +66,8 @@ class AttnChunk(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, D = x.shape
         K = self.chunk_size
-        if N % K != 0:
-            pad = K - (N % K)
-            x = F.pad(x, (0, 0, 0, pad), mode="replicate")
+        n_full = N // K
+        x = x[:, :n_full * K, :]
         chunks = x.view(B, -1, K, D)
         attn = (self.query * chunks).sum(dim=-1) * self.scale  # [B, n_chunks, K]
         attn = F.softmax(attn, dim=-1)
@@ -84,11 +78,6 @@ class AttnChunk(nn.Module):
 
 
 class LinearChunk(nn.Module):
-    """Learnable linear projection: concatenate K tokens → project to 1.
-
-    Initialized to approximate mean pooling so training starts from a
-    working baseline rather than random noise."""
-
     def __init__(self, dim: int, chunk_size: int):
         super().__init__()
         self.chunk_size = chunk_size
@@ -96,7 +85,6 @@ class LinearChunk(nn.Module):
         self._init_as_mean_pool()
 
     def _init_as_mean_pool(self):
-        """Set weights so output ≈ mean of K input slices."""
         D = self.proj.out_features
         K = self.chunk_size
         weight = torch.zeros(D * K, D)
@@ -107,9 +95,8 @@ class LinearChunk(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, D = x.shape
         K = self.chunk_size
-        if N % K != 0:
-            pad = K - (N % K)
-            x = F.pad(x, (0, 0, 0, pad), mode="replicate")
+        n_full = N // K
+        x = x[:, :n_full * K, :]
         chunks = x.view(B, -1, K * D)
         return self.proj(chunks)
 
