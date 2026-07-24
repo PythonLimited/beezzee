@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from accelerate import Accelerator
 from peft import get_peft_model, LoraConfig, TaskType
 
 from src.chunkers import build_chunker
@@ -52,7 +53,9 @@ def main():
 
     K = args.chunk_size
     MODEL_DIR = Path("models/Qwen_Qwen3.5-0.8B-Base")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    accelerator = Accelerator(mixed_precision="bf16")
+    device = accelerator.device
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float16
 
     print(f"Device: {device}  K={K}  lora_rank={args.lora_rank}")
@@ -88,9 +91,6 @@ def main():
     model = model.to(device)
     model.train()
 
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"  LoRA params: {trainable:,}  (full-attn layers: {sorted(full_attn)})")
-
     # Chunker + decompressor
     dim = model.get_base_model().config.hidden_size
     head_dim = model.get_base_model().config.head_dim
@@ -98,14 +98,10 @@ def main():
     chunker = build_chunker("linear", dim, K).to(device=device, dtype=torch.float32)
     decompressor = KVDecompressor(head_dim, K, depth=5).to(device=device, dtype=dtype)
 
-    chunker.train()
-    decompressor.train()
-
-    all_params = (list(chunker.parameters()) + list(decompressor.parameters()) +
-                  [p for p in model.parameters() if p.requires_grad])
-    print(f"  Chunker: {sum(p.numel() for p in chunker.parameters()):,}")
-    print(f"  Decompressor: {sum(p.numel() for p in decompressor.parameters()):,}")
-    print(f"  Total trainable: {sum(p.numel() for p in all_params):,}")
+    if accelerator.is_main_process:
+        trainable_lo = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"  LoRA params: {trainable_lo:,}  (full-attn layers: {sorted(full_attn)})")
+        print(f"  Chunker + decompressor: {sum(p.numel() for p in chunker.parameters()) + sum(p.numel() for p in decompressor.parameters()):,}")
 
     optimizer = torch.optim.AdamW([
         {"params": chunker.parameters(), "lr": args.lr * 10},
@@ -116,6 +112,12 @@ def main():
         optimizer, T_max=args.steps, eta_min=1e-6
     )
 
+    model, chunker, decompressor, optimizer, scheduler = accelerator.prepare(
+        model, chunker, decompressor, optimizer, scheduler
+    )
+
+    get_embeds = model.get_input_embeddings()  # capture before DDP wrap changes behavior
+
     # Teacher model (frozen, full-context)
     teacher = AutoModelForCausalLM.from_pretrained(
         str(MODEL_DIR), dtype=dtype,
@@ -125,7 +127,11 @@ def main():
     for p in teacher.parameters():
         p.requires_grad = False
 
-    dataset = TextDataset(tokenizer, seq_len=args.seq_len)
+    dataset = TextDataset(
+        tokenizer, seq_len=args.seq_len,
+        rank=accelerator.process_index,
+        world_size=accelerator.num_processes,
+    )
     data_iter = iter(dataset)
 
     start_step = 0
@@ -143,14 +149,17 @@ def main():
         try:
             input_ids = next(data_iter).to(device)
         except StopIteration:
-            dataset = TextDataset(tokenizer, seq_len=args.seq_len)
+            dataset = TextDataset(
+                tokenizer, seq_len=args.seq_len,
+                rank=accelerator.process_index,
+                world_size=accelerator.num_processes,
+            )
             data_iter = iter(dataset)
             input_ids = next(data_iter).to(device)
 
         B, N_full = input_ids.shape
         N = (N_full // K) * K
         input_ids = input_ids[:, :N]
-        base = model.get_base_model()
 
         # 1. Teacher: full forward → next-token logits
         with torch.no_grad():
@@ -159,7 +168,7 @@ def main():
             t_logits = t_out.logits[:, -1, :]  # [B, V]
 
         # 2. Student: compress → model+LoRA → next-token logits
-        embeds = base.get_input_embeddings()(input_ids)
+        embeds = model.get_input_embeddings()(input_ids)
         compressed = chunker(embeds)  # [B, N/K, D]
 
         # Sparse position IDs so chunks align with teacher
@@ -209,19 +218,20 @@ def main():
         total_loss = kl_loss + 0.01 * kv_loss
 
         optimizer.zero_grad()
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(
-            list(chunker.parameters()) + list(decompressor.parameters()) +
-            [p for p in model.parameters() if p.requires_grad],
-            1.0,
-        )
+        accelerator.backward(total_loss)
+        if accelerator.sync_gradients:
+            accelerator.clip_grad_norm_(
+                list(chunker.parameters()) + list(decompressor.parameters()) +
+                [p for p in model.parameters() if p.requires_grad],
+                1.0,
+            )
         optimizer.step()
         scheduler.step()
 
         running_loss += total_loss.item()
         running_kl += kl_loss.item()
 
-        if (step + 1) % 100 == 0:
+        if (step + 1) % 100 == 0 and accelerator.is_main_process:
             avg_loss = running_loss / 100
             avg_kl = running_kl / 100
             pct = 100 * (step + 1) / args.steps
@@ -236,23 +246,27 @@ def main():
             running_kl = 0.0
 
         if (step + 1) % 500 == 0:
-            Path("checkpoints").mkdir(exist_ok=True)
-            out = Path("checkpoints") / f"mtc_e2e_k{K}_step{step+1}.pt"
-            torch.save({
-                "step": step + 1,
-                "chunker_state": chunker.state_dict(),
-                "decompressor_state": decompressor.state_dict(),
-                "lora_state": {
-                    k: v for k, v in model.state_dict().items() if "lora" in k
-                },
-                "chunk_size": K,
-                "hidden_dim": dim,
-                "kv_head_dim": head_dim,
-            }, out)
-            print(f"           saved -> {out}")
+            if accelerator.is_main_process:
+                Path("checkpoints").mkdir(exist_ok=True)
+                out = Path("checkpoints") / f"mtc_e2e_k{K}_step{step+1}.pt"
+                torch.save({
+                    "step": step + 1,
+                    "chunker_state": accelerator.unwrap_model(chunker).state_dict(),
+                    "decompressor_state": accelerator.unwrap_model(decompressor).state_dict(),
+                    "lora_state": {
+                        k: v for k, v in accelerator.unwrap_model(model).state_dict().items()
+                        if "lora" in k
+                    },
+                    "chunk_size": K,
+                    "hidden_dim": dim,
+                    "kv_head_dim": head_dim,
+                }, out)
+                print(f"           saved -> {out}")
+            accelerator.wait_for_everyone()
 
-    print(f"\nDone.")
-    print(f"  chunker + decompressor + LoRA saved to checkpoints/")
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        print(f"\nDone. chunker + decompressor + LoRA saved to checkpoints/")
 
 
 if __name__ == "__main__":
