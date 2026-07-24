@@ -18,10 +18,21 @@ from src.chunkers import build_chunker
 def compatible_position_ids(
     position_ids: torch.Tensor,
     chunk_size: int,
+    long_context: bool = False,
 ) -> torch.Tensor:
-    """Map N positions → N/K using last position of each chunk (best quality)."""
+    """
+    Map N positions → ceil(N/K) position IDs.
+
+    non-contiguous (default): [K-1, 2K-1, ...] — best quality at ≤32K
+    contiguous (long_context): [0, 1, 2, ...] — flash-attn compatible for 65K+
+    """
     N = position_ids.shape[-1]
     K = chunk_size
+
+    if long_context:
+        n_compressed = N // K + (1 if N % K else 0)
+        return torch.arange(n_compressed, device=position_ids.device).unsqueeze(0)
+
     n_full = N // K
     pids = position_ids.squeeze(0)
     compressed = pids[:n_full * K].view(-1, K)[:, -1]
@@ -83,11 +94,13 @@ class MTCModel(nn.Module):
     def device(self):
         return next(self.base.parameters()).device
 
-    def prefill(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, DynamicCache]:
-        """Compressed prefill using contiguous positions.
+    def prefill(self, input_ids: torch.Tensor, long_context: bool = False) -> tuple[torch.Tensor, DynamicCache]:
+        """Compressed prefill.
 
-        The cache has N/K entries at positions [0, 1, 2, ...].
-        Generation works natively — no decompression needed."""
+        Args:
+            long_context: if True, use contiguous positions + flash-attn
+                          for 65K+ sequences (slightly lower quality).
+        """
         B, N = input_ids.shape
         K = self.chunk_size
 
@@ -97,7 +110,7 @@ class MTCModel(nn.Module):
             model_dtype = next(self.base.parameters()).dtype
 
             pos_ids = torch.arange(N, device=input_ids.device).unsqueeze(0)
-            pos_ids_compressed = compatible_position_ids(pos_ids, K)
+            pos_ids_compressed = compatible_position_ids(pos_ids, K, long_context)
 
             outputs = self.base.model(
                 inputs_embeds=compressed.to(model_dtype),
