@@ -43,8 +43,6 @@ class MTCTrainer:
         for p in self.base.parameters():
             p.requires_grad = False
 
-        self._compiled_model = torch.compile(self.base.model, mode="default", fullgraph=False)
-
         params = list(self.chunker.parameters())
         if decompressor is not None:
             params += list(decompressor.parameters())
@@ -58,7 +56,7 @@ class MTCTrainer:
 
     @torch.no_grad()
     def _model(self, embeds, pos_ids, use_cache=False):
-        out = self._compiled_model(inputs_embeds=embeds, position_ids=pos_ids, use_cache=use_cache)
+        out = self.base.model(inputs_embeds=embeds, position_ids=pos_ids, use_cache=use_cache)
         return out.last_hidden_state, out.past_key_values
 
     @torch.no_grad()

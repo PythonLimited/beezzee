@@ -43,11 +43,6 @@ class KVDecompressorTrainer:
         for p in self.chunker.parameters():
             p.requires_grad = False
 
-        # Compile model for faster forward passes
-        self._compiled_model = torch.compile(
-            self.base.model, mode="default", fullgraph=False
-        )
-
         params = list(self.decompressor.parameters())
         print(f"Trainable decompressor params: {sum(p.numel() for p in params):,}")
         self.optimizer = torch.optim.AdamW(params, lr=1e-4, weight_decay=0.01)
@@ -57,7 +52,7 @@ class KVDecompressorTrainer:
 
     @torch.no_grad()
     def _model_forward(self, embeds: torch.Tensor, pos_ids: torch.Tensor) -> tuple:
-        out = self._compiled_model(inputs_embeds=embeds, position_ids=pos_ids, use_cache=True)
+        out = self.base.model(inputs_embeds=embeds, position_ids=pos_ids, use_cache=True)
         return out.last_hidden_state, out.past_key_values
 
     def train_step(self, input_ids: torch.Tensor) -> dict:
