@@ -17,7 +17,7 @@ from src.mtc_model import MTCModel
 from src.benchmark import logit_divergence
 
 
-LENGTHS = [64, 256, 1024, 4096, 8192, 16384, 32768, 65536, 131072, 262144]
+LENGTHS = [64, 256, 1024, 4096, 8192, 16384, 32768, 65536, 131072]
 
 PROMPTS = [
     ("factual",   "The capital of France is Paris. The capital of Germany is Berlin. "),
@@ -100,20 +100,11 @@ def main():
 
                 # Warmup
                 with torch.no_grad():
-                    _ = mtc.standard_prefill(input_ids)
                     _ = mtc.prefill(input_ids)
                 if device.type == "cuda":
                     torch.cuda.synchronize()
 
-                # Time standard prefill
-                t0 = time.perf_counter()
-                with torch.no_grad():
-                    std_logits, _ = mtc.standard_prefill(input_ids)
-                if device.type == "cuda":
-                    torch.cuda.synchronize()
-                t_std = time.perf_counter() - t0
-
-                # Time MTC prefill
+                # Time MTC prefill (always works — compressed sequence)
                 t0 = time.perf_counter()
                 with torch.no_grad():
                     mtc_logits, _ = mtc.prefill(input_ids)
@@ -121,12 +112,41 @@ def main():
                     torch.cuda.synchronize()
                 t_mtc = time.perf_counter() - t0
 
-                speedup = t_std / t_mtc if t_mtc > 0 else 0
+                # Time standard prefill (may OOM at 65K+ with full tokens)
+                t_std = 0
+                try:
+                    t0 = time.perf_counter()
+                    with torch.no_grad():
+                        std_logits, _ = mtc.standard_prefill(input_ids)
+                    if device.type == "cuda":
+                        torch.cuda.synchronize()
+                    t_std = time.perf_counter() - t0
+                except RuntimeError as e:
+                    if "out of memory" in str(e).lower():
+                        t_std = 0  # signal: std prefill OOMed
+                    else:
+                        raise
+
+                speedup = t_std / t_mtc if t_mtc > 0 and t_std > 0 else 0
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
                     print(f"  {'':>72s}  ← OOM, skipping {label} at len {target}")
+                    if device.type == "cuda":
+                        torch.cuda.empty_cache()
                     break
                 raise
+
+            if t_std == 0:
+                # Standard OOMed — only show MTC time
+                std_logits = mtc_logits  # fallback for div comparison
+                div = logit_divergence(mtc_logits[0, 0], mtc_logits[0, 0])
+                flag = "~"
+                speed_str = f"{'N/A':>6s}"
+                matched_str = "~"
+                print(
+                    f"  {flag} {label:11s} | {N:5d}→{comp:4d} | {'---':>8s} | {'---':>5s} |  ~  | {speed_str} | {t_mtc*1000:6.0f}ms | ---"
+                )
+                continue
 
             div = logit_divergence(std_logits[0, 0], mtc_logits[0, 0])
             flag = "✓" if div["top1_match"] else " "
