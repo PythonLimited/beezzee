@@ -15,13 +15,12 @@ class TrainConfig:
     # ── Chunker ──
     chunker_type: str = "linear"         # mean | attention | linear
     chunk_size: int = 4                  # K tokens → 1 embedding
-    contiguous_positions: bool = False   # True = flash-attn 65K+, False = best quality
 
     # ── Decompressor ──
-    train_decompressor: bool = True      # joint chunker + KV decompressor
+    train_decompressor: bool = False     # enable after chunker converges
 
     # ── Training ──
-    steps: int = 14000
+    steps: int = 15000
     eval_every: int = 100
     kl_temperature: float = 2.0
     lr: float = 2e-4  # higher LR for faster convergence
@@ -34,8 +33,9 @@ class TrainConfig:
     # MPS/16GB: ~16K is the practical limit for 0.8B.
     # GPU/24GB: 32K-64K for 0.8B, less for 27B.
     length_schedule: dict[int, int] = field(default_factory=lambda: {
-        0: 256, 2000: 512, 4000: 1024, 6000: 2048,
+        0: 256,  2000: 512,  4000: 1024, 6000: 2048,
         8000: 4096, 10000: 8192, 11500: 16384, 13000: 32768,
+        14000: 65536, 14500: 131072,
     })
 
     # ── Paths ──
@@ -66,11 +66,11 @@ qwen3_6_27b_gpu = TrainConfig(
     model_id="Qwen/Qwen3.6-27B-FP8",
     dtype="bfloat16",
     attn_implementation="sdpa",
-    steps=14000,
+    steps=10000,
     chunk_size=4,
     length_schedule={
-        0: 256, 2000: 512, 4000: 1024, 6000: 2048,
-        8000: 4096, 10000: 8192, 11500: 16384, 13000: 32768,
+        0: 256, 1500: 512, 3000: 1024, 4500: 2048,
+        6000: 4096, 7500: 8192, 8500: 16384, 9500: 32768,
     },
 )
 
@@ -82,7 +82,8 @@ qwen3_5_08b_dgx = TrainConfig(
     steps=15000,
     chunk_size=4,
     length_schedule={
-        0: 256, 2000: 512, 4000: 1024, 6000: 2048,
+        0: 256,     2000: 512,   4000: 1024,  6000: 2048,
         8000: 4096, 10000: 8192, 11500: 16384, 13000: 32768,
+        14000: 65536, 14500: 131072,
     },
 )

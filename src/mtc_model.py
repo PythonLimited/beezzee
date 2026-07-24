@@ -18,21 +18,10 @@ from src.chunkers import build_chunker
 def compatible_position_ids(
     position_ids: torch.Tensor,
     chunk_size: int,
-    contiguous: bool = False,
 ) -> torch.Tensor:
-    """
-    Map N positions → ceil(N/K) position IDs.
-
-    contiguous=False (default): [K-1, 2K-1, ...] — best quality
-    contiguous=True:             [0, 1, 2, ...] — flash-attn compat, 65K+
-    """
+    """Map N positions → N/K using last position of each chunk (best quality)."""
     N = position_ids.shape[-1]
     K = chunk_size
-
-    if contiguous:
-        n_compressed = N // K + (1 if N % K else 0)
-        return torch.arange(n_compressed, device=position_ids.device).unsqueeze(0)
-
     n_full = N // K
     pids = position_ids.squeeze(0)
     compressed = pids[:n_full * K].view(-1, K)[:, -1]
@@ -95,7 +84,10 @@ class MTCModel(nn.Module):
         return next(self.base.parameters()).device
 
     def prefill(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, DynamicCache]:
-        """Compressed prefill: contiguous positions, flash-attn compatible."""
+        """Compressed prefill using contiguous positions.
+
+        The cache has N/K entries at positions [0, 1, 2, ...].
+        Generation works natively — no decompression needed."""
         B, N = input_ids.shape
         K = self.chunk_size
 
