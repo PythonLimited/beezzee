@@ -57,7 +57,7 @@ class MTCModel(nn.Module):
         super().__init__()
         self.base = base_model
         self.tokenizer = tokenizer
-        self.chunk_size = chunk_size
+        self._chunk_size = chunk_size  # bypass setter until chunker exists
         self.hidden_dim = base_model.config.hidden_size
         self.chunker = build_chunker(chunk_name, self.hidden_dim, chunk_size)
         self.decompressor = decompressor
