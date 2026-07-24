@@ -28,13 +28,10 @@ class KVDecompressorTrainer:
         decompressor: nn.Module,
         chunk_size: int = 4,
     ):
-        from src.mtc_model import compatible_position_ids
-
         self.base = base_model
         self.chunker = chunker
         self.decompressor = decompressor
         self.chunk_size = chunk_size
-        self._compatible_pos = compatible_position_ids
 
         self.base.eval()
         self.chunker.eval()
@@ -66,8 +63,8 @@ class KVDecompressorTrainer:
         )
 
     @torch.no_grad()
-    def _model_forward(self, embeds: torch.Tensor, pos_ids: torch.Tensor) -> tuple:
-        out = self.base.model(inputs_embeds=embeds, position_ids=pos_ids, use_cache=True)
+    def _model_forward(self, embeds: torch.Tensor) -> tuple:
+        out = self.base.model(inputs_embeds=embeds, use_cache=True)
         return out.last_hidden_state, out.past_key_values
 
     def train_step(self, input_ids: torch.Tensor) -> dict:
@@ -85,11 +82,10 @@ class KVDecompressorTrainer:
             pos_full = torch.arange(N, device=device).unsqueeze(0)
             _, gt_cache = self._model_forward(embeds_full, pos_full)
 
-        # 2. Compressed prefill → compressed KV
+        # 2. Compressed prefill → compressed KV (contiguous positions, model default)
         with torch.no_grad():
             compressed = self.chunker(embeds_full.to(self.chunker.proj.weight.dtype))
-            pos_comp = self._compatible_pos(torch.arange(N, device=device).unsqueeze(0), K)
-            _, comp_cache = self._model_forward(compressed.to(dtype), pos_comp)
+            _, comp_cache = self._model_forward(compressed.to(dtype))
 
         # 3. For each full-attention layer, decompress and compute MSE
         total_loss = 0.0

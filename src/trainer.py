@@ -11,7 +11,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import IterableDataset
 
-from src.mtc_model import compatible_position_ids
 
 
 def _is_main():
@@ -69,8 +68,11 @@ class MTCTrainer:
         )
 
     @torch.no_grad()
-    def _model(self, embeds, pos_ids, use_cache=False):
-        out = self.base.model(inputs_embeds=embeds, position_ids=pos_ids, use_cache=use_cache)
+    def _model(self, embeds, pos_ids=None, use_cache=False):
+        kwargs = {"inputs_embeds": embeds, "use_cache": use_cache}
+        if pos_ids is not None:
+            kwargs["position_ids"] = pos_ids
+        out = self.base.model(**kwargs)
         return out.last_hidden_state, out.past_key_values
 
     @torch.no_grad()
@@ -87,10 +89,8 @@ class MTCTrainer:
 
     @torch.no_grad()
     def _student_forward(self, compressed, N):
-        pos = torch.arange(N, device=compressed.device).unsqueeze(0)
-        pos_c = compatible_position_ids(pos, self.chunk_size)
         dtype = next(self.base.parameters()).dtype
-        return self._model(compressed.to(dtype), pos_c, use_cache=self.decompressor is not None)
+        return self._model(compressed.to(dtype), use_cache=self.decompressor is not None)
 
     def train_step(self, input_ids):
         B, N_full = input_ids.shape

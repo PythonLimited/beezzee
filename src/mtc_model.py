@@ -19,16 +19,17 @@ def compatible_position_ids(
     position_ids: torch.Tensor,
     chunk_size: int,
 ) -> torch.Tensor:
-    """Map N positions → N/K using last position of each chunk (best quality)."""
+    """Map N positions → N/K using contiguous [0 .. N/K-1].
+
+    Flash Attention 2 requires contiguous position IDs. The compressed
+    prefill uses positions [0, 1, ..., N/K-1] — one per chunk.
+    The decompressor (when trained) recovers correct RoPE for
+    positions 0..N-1 during KV expansion."""
     N = position_ids.shape[-1]
     K = chunk_size
     n_full = N // K
     pids = position_ids.squeeze(0)
-    compressed = pids[:n_full * K].view(-1, K)[:, -1]
-    remainder = N % K
-    if remainder:
-        compressed = torch.cat([compressed, pids[-remainder:][-1:]], dim=0)
-    return compressed.unsqueeze(0)
+    return pids[:n_full].unsqueeze(0)
 
 
 class MTCModel(nn.Module):
@@ -94,11 +95,11 @@ class MTCModel(nn.Module):
         return next(self.base.parameters()).device
 
     def prefill(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, DynamicCache]:
-        """Compressed prefill using last-position-of-chunk position IDs.
+        """Compressed prefill with contiguous positions [0 .. N/K-1].
 
-        The cache initially has N/K entries at positions [K-1, 2K-1, ...].
-        If a decompressor is provided, full-attention layers are expanded
-        to N entries for standard autoregressive generation from position N."""
+        Flash Attention 2 compatible. The decompressor (when provided)
+        expands full-attention KV from N/K → N entries so generation
+        can start from position N with correct RoPE."""
         B, N_full = input_ids.shape
         K = self.chunk_size
         n_full = N_full // K
@@ -110,12 +111,8 @@ class MTCModel(nn.Module):
             compressed = self.chunker(embeddings)
             model_dtype = next(self.base.parameters()).dtype
 
-            pos_ids = torch.arange(N, device=input_ids.device).unsqueeze(0)
-            pos_ids_compressed = compatible_position_ids(pos_ids, K)
-
             outputs = self.base.model(
                 inputs_embeds=compressed.to(model_dtype),
-                position_ids=pos_ids_compressed,
                 use_cache=True,
                 past_key_values=None,
             )

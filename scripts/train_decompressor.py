@@ -72,8 +72,6 @@ def main():
     print(f"  Steps: {STEPS}")
     print(f"{'='*60}\n")
 
-    from src.mtc_model import compatible_position_ids
-
     dataset = TextDataset(tokenizer, seq_len=seq_len)
     data_iter = iter(dataset)
 
@@ -96,12 +94,11 @@ def main():
             gt_out = model(input_ids=input_ids, use_cache=True)
             gt_cache = gt_out.past_key_values
 
-        # Compressed prefill → compressed KV
+        # Compressed prefill → compressed KV (contiguous positions, model default)
         with torch.no_grad():
             embeds_full = model.get_input_embeddings()(input_ids)
             compressed = chunker(embeds_full)
-            pos_comp = compatible_position_ids(torch.arange(N, device=device).unsqueeze(0), K)
-            comp_out = model(inputs_embeds=compressed.to(dtype), position_ids=pos_comp, use_cache=True)
+            comp_out = model(inputs_embeds=compressed.to(dtype), use_cache=True)
             comp_cache = comp_out.past_key_values
 
         # Decompress and compute MSE for each full-attention layer
