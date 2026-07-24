@@ -1,7 +1,7 @@
-"""Train the KV decompressor using a pre-trained chunker checkpoint.
+"""Train KV decompressor from a chunker checkpoint (separate project).
 
 Usage:
-    python scripts/train_decompressor.py checkpoints/chunker_linear_k4_step5000.pt
+    python scripts/train_decompressor.py checkpoints/chunker_linear_k4_step14400.pt
 """
 
 import sys
@@ -14,7 +14,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.chunkers import build_chunker
 from src.kv_decompressor import KVDecompressor
-from src.kv_trainer import KVDecompressorTrainer
 from src.trainer import TextDataset
 
 
@@ -30,7 +29,7 @@ def main():
 
     ckpt = torch.load(ckpt_path, map_location="cpu")
     K = ckpt["chunk_size"]
-    print(f"Chunker checkpoint: step={ckpt['step']}, K={K}")
+    print(f"Chunker: step={ckpt['step']}  K={K}")
 
     print(f"Loading model from {MODEL_DIR} ...")
     tokenizer = AutoTokenizer.from_pretrained(str(MODEL_DIR))
@@ -38,36 +37,32 @@ def main():
         str(MODEL_DIR),
         dtype=torch.bfloat16 if device.type == "cuda" else torch.float16,
         attn_implementation="sdpa" if device.type == "cuda" else "eager",
-        device_map={"": device} if device.type == "cuda" else None,
-    )
-    if device.type != "cuda":
-        model = model.to(device)
-    model.eval()
+        low_cpu_mem_usage=True,
+    ).to(device).eval()
 
     chunker = build_chunker(ckpt["chunker_type"], ckpt["hidden_dim"], K)
     chunker.load_state_dict(ckpt["chunker_state"])
-    chunker = chunker.to(device=device, dtype=model.dtype)
-    chunker.eval()
+    chunker = chunker.to(device=device, dtype=model.dtype).eval()
+    for p in chunker.parameters():
+        p.requires_grad = False
 
-    D = model.config.hidden_size
-    decompressor = KVDecompressor(D, K).to(device=device, dtype=model.dtype)
+    # Use KV head dim, not hidden_size
+    head_dim = model.config.head_dim
+    decompressor = KVDecompressor(head_dim, K).to(device=device, dtype=model.dtype)
     decompressor.train()
 
-    trainer = KVDecompressorTrainer(
-        base_model=model,
-        chunker=chunker,
-        decompressor=decompressor,
-        chunk_size=K,
-    )
+    optimizer = torch.optim.AdamW(decompressor.parameters(), lr=1e-4, weight_decay=0.01)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=5000, eta_min=1e-6)
 
-    STEPS = 2000
+    STEPS = 5000
     seq_len = 256
-
     print(f"\n{'='*60}")
-    print(f"  Decompressor: 3-layer MLP, K={K}")
+    print(f"  Decompressor: 3-layer MLP, K={K}, head_dim={head_dim}")
     print(f"  Params: {sum(p.numel() for p in decompressor.parameters()):,}")
     print(f"  Steps: {STEPS}")
     print(f"{'='*60}\n")
+
+    from src.mtc_model import compatible_position_ids
 
     dataset = TextDataset(tokenizer, seq_len=seq_len)
     data_iter = iter(dataset)
@@ -81,30 +76,61 @@ def main():
             data_iter = iter(dataset)
             input_ids = next(data_iter).to(device)
 
-        metrics = trainer.train_step(input_ids)
-        running_loss += metrics["loss"]
+        B, N = input_ids.shape
+        dtype = next(model.parameters()).dtype
+
+        # Ground truth: full prefill → KV from full-attention layers
+        with torch.no_grad():
+            embeds_full = model.get_input_embeddings()(input_ids)
+            pos_full = torch.arange(N, device=device).unsqueeze(0)
+            _, gt_cache = model.model(inputs_embeds=embeds_full, position_ids=pos_full,
+                                       use_cache=True)
+
+        # Compressed prefill → compressed KV
+        with torch.no_grad():
+            compressed = chunker(embeds_full)
+            pos_comp = compatible_position_ids(torch.arange(N, device=device).unsqueeze(0), K)
+            _, comp_cache = model.model(inputs_embeds=compressed.to(dtype),
+                                         position_ids=pos_comp, use_cache=True)
+
+        # Decompress and compute MSE for each full-attention layer
+        loss = torch.tensor(0.0, device=device)
+        n_layers = 0
+        for comp_layer, gt_layer in zip(comp_cache.layers, gt_cache.layers):
+            if not (hasattr(comp_layer, "keys") and hasattr(gt_layer, "keys")):
+                continue
+            if not hasattr(comp_layer, "values") or not hasattr(gt_layer, "values"):
+                continue
+
+            exp_k = decompressor(comp_layer.keys)[:, :, :N, :]
+            exp_v = decompressor(comp_layer.values)[:, :, :N, :]
+            loss += torch.nn.functional.mse_loss(exp_k, gt_layer.keys)
+            loss += torch.nn.functional.mse_loss(exp_v, gt_layer.values)
+            n_layers += 1
+
+        if n_layers == 0:
+            continue
+        loss = loss / n_layers
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(decompressor.parameters(), 1.0)
+        optimizer.step()
+        scheduler.step()
+
+        running_loss += loss.item()
 
         if (step + 1) % 50 == 0:
-            print(
-                f"  Step {step+1:5d}/{STEPS} | "
-                f"loss: {running_loss/50:.6f} | "
-                f"lr: {metrics['lr']:.2e}"
-            )
+            print(f"  Step {step+1:5d}/{STEPS} | loss: {running_loss/50:.6f} | lr: {scheduler.get_last_lr()[0]:.2e}")
             running_loss = 0.0
 
-        if (step + 1) % 200 == 0:
-            ckpt_dir = Path("checkpoints")
-            ckpt_dir.mkdir(exist_ok=True)
-            out = ckpt_dir / f"decompressor_k{K}_step{step+1}.pt"
-            torch.save(
-                {
-                    "step": step + 1,
-                    "decompressor_state": decompressor.state_dict(),
-                    "chunk_size": K,
-                    "hidden_dim": D,
-                },
-                out,
-            )
+        if (step + 1) % 500 == 0:
+            Path("checkpoints").mkdir(exist_ok=True)
+            out = Path("checkpoints") / f"decompressor_k{K}_step{step+1}.pt"
+            torch.save({
+                "step": step + 1, "decompressor_state": decompressor.state_dict(),
+                "chunk_size": K, "head_dim": head_dim,
+            }, out)
             print(f"           saved → {out}")
 
     print("\nDone.")
