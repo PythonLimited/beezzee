@@ -51,8 +51,8 @@ def main():
     decompressor = KVDecompressor(head_dim, K).to(device=device, dtype=model.dtype)
     decompressor.train()
 
-    optimizer = torch.optim.AdamW(decompressor.parameters(), lr=1e-4, weight_decay=0.01)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=5000, eta_min=1e-6)
+    optimizer = torch.optim.AdamW(decompressor.parameters(), lr=5e-4, weight_decay=0.01)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10000, eta_min=1e-5)
 
     STEPS = 5000
     seq_len = 256

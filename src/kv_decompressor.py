@@ -28,10 +28,10 @@ class KVDecompressor(nn.Module):
 
         # MLP: input = compressed_kv + pos_emb → expanded_kv
         self.net = nn.Sequential(
-            nn.Linear(dim * 2, dim * hidden_mult),
-            nn.GELU(),
-            nn.Linear(dim * hidden_mult, dim * 2),
-            nn.GELU(),
+            nn.Linear(dim * 2, dim * hidden_mult), nn.GELU(),
+            nn.Linear(dim * hidden_mult, dim * hidden_mult * 2), nn.GELU(),
+            nn.Linear(dim * hidden_mult * 2, dim * hidden_mult), nn.GELU(),
+            nn.Linear(dim * hidden_mult, dim * 2), nn.GELU(),
             nn.Linear(dim * 2, dim),
         )
 
