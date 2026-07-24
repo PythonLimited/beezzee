@@ -1,6 +1,7 @@
 torch>=2.10
 transformers>=4.50
 accelerate>=1.0
+peft>=0.14
 openai>=1.0
 psutil
 datasets
