@@ -15,9 +15,10 @@ class TrainConfig:
     # ── Chunker ──
     chunker_type: str = "linear"         # mean | attention | linear
     chunk_size: int = 4                  # K tokens → 1 embedding
+    contiguous_positions: bool = False   # True = flash-attn 65K+, False = best quality
 
     # ── Decompressor ──
-    train_decompressor: bool = False     # enable after chunker converges
+    train_decompressor: bool = True      # joint chunker + KV decompressor
 
     # ── Training ──
     steps: int = 14000
