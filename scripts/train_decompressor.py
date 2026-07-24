@@ -94,11 +94,14 @@ def main():
             gt_out = model(input_ids=input_ids, use_cache=True)
             gt_cache = gt_out.past_key_values
 
-        # Compressed prefill → compressed KV (contiguous positions, model default)
+        # Compressed prefill → compressed KV (sparse positions, aligns with teacher)
         with torch.no_grad():
             embeds_full = model.get_input_embeddings()(input_ids)
             compressed = chunker(embeds_full)
-            comp_out = model(inputs_embeds=compressed.to(dtype), use_cache=True)
+            n_full = N // K
+            pos = torch.arange(N, device=device).unsqueeze(0)
+            pos_c = pos[:, :n_full * K].view(-1, K)[:, -1].unsqueeze(0)
+            comp_out = model(inputs_embeds=compressed.to(dtype), position_ids=pos_c, use_cache=True)
             comp_cache = comp_out.past_key_values
 
         # Decompress and compute MSE for each full-attention layer

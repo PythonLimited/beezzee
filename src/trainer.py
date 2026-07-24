@@ -68,11 +68,10 @@ class MTCTrainer:
         )
 
     @torch.no_grad()
-    def _model(self, embeds, pos_ids=None, use_cache=False):
-        kwargs = {"inputs_embeds": embeds, "use_cache": use_cache}
-        if pos_ids is not None:
-            kwargs["position_ids"] = pos_ids
-        out = self.base.model(**kwargs)
+    def _model(self, embeds, pos_ids, use_cache=False):
+        out = self.base.model(
+            inputs_embeds=embeds, position_ids=pos_ids, use_cache=use_cache
+        )
         return out.last_hidden_state, out.past_key_values
 
     @torch.no_grad()
@@ -89,8 +88,12 @@ class MTCTrainer:
 
     @torch.no_grad()
     def _student_forward(self, compressed, N):
+        K = self.chunk_size
+        n_full = N // K
+        pos = torch.arange(N, device=compressed.device).unsqueeze(0)
+        pos_c = pos[:, :n_full * K].view(-1, K)[:, -1].unsqueeze(0)
         dtype = next(self.base.parameters()).dtype
-        return self._model(compressed.to(dtype), use_cache=self.decompressor is not None)
+        return self._model(compressed.to(dtype), pos_c, use_cache=self.decompressor is not None)
 
     def train_step(self, input_ids):
         B, N_full = input_ids.shape

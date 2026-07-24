@@ -63,8 +63,8 @@ class KVDecompressorTrainer:
         )
 
     @torch.no_grad()
-    def _model_forward(self, embeds: torch.Tensor) -> tuple:
-        out = self.base.model(inputs_embeds=embeds, use_cache=True)
+    def _model_forward(self, embeds: torch.Tensor, pos_ids: torch.Tensor) -> tuple:
+        out = self.base.model(inputs_embeds=embeds, position_ids=pos_ids, use_cache=True)
         return out.last_hidden_state, out.past_key_values
 
     def train_step(self, input_ids: torch.Tensor) -> dict:
@@ -82,10 +82,13 @@ class KVDecompressorTrainer:
             pos_full = torch.arange(N, device=device).unsqueeze(0)
             _, gt_cache = self._model_forward(embeds_full, pos_full)
 
-        # 2. Compressed prefill → compressed KV (contiguous positions, model default)
+        # 2. Compressed prefill → compressed KV (sparse positions, aligns with teacher)
         with torch.no_grad():
             compressed = self.chunker(embeds_full.to(self.chunker.proj.weight.dtype))
-            _, comp_cache = self._model_forward(compressed.to(dtype))
+            n_full = N // K
+            pos = torch.arange(N, device=device).unsqueeze(0)
+            pos_c = pos[:, :n_full * K].view(-1, K)[:, -1].unsqueeze(0)
+            _, comp_cache = self._model_forward(compressed.to(dtype), pos_c)
 
         # 3. For each full-attention layer, decompress and compute MSE
         total_loss = 0.0
