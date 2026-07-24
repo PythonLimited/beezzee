@@ -103,7 +103,7 @@ class MTCTrainer:
         proxy_loss = (compressed * grad_output.to(compressed.dtype).detach()).sum()
 
         # Decompressor loss: MSE on KV caches
-        loss_kv = torch.tensor(0.0, device=input_ids.device)
+        loss_kv = 0.0
         n_layers = 0
         if self.decompressor is not None:
             for comp_layer, gt_layer in zip(student_kv.layers, teacher_kv.layers):
@@ -113,13 +113,11 @@ class MTCTrainer:
                     continue
                 exp_k = self.decompressor(comp_layer.keys)[:, :, :N, :]
                 exp_v = self.decompressor(comp_layer.values)[:, :, :N, :]
-                lk = F.mse_loss(exp_k, gt_layer.keys)
-                lv = F.mse_loss(exp_v, gt_layer.values)
-                loss_kv += lk + lv
+                loss_kv += F.mse_loss(exp_k, gt_layer.keys).item()
+                loss_kv += F.mse_loss(exp_v, gt_layer.values).item()
                 n_layers += 1
-                # Debug first layer
                 if n_layers == 1:
-                    self._dbg = (comp_layer.keys.shape, gt_layer.keys.shape, exp_k.shape, lk.item())
+                    self._dbg = (comp_layer.keys.shape, gt_layer.keys.shape, exp_k.shape, loss_kv)
             if n_layers > 0:
                 loss_kv = loss_kv / n_layers
 
@@ -131,7 +129,7 @@ class MTCTrainer:
 
         return {
             "loss": loss_hidden.item() / student_hidden.shape[-1],
-            "loss_kv": loss_kv.item(),
+            "loss_kv": loss_kv,
             "top1_match": top1,
             "lr": self.scheduler.get_last_lr()[0],
             "_proxy_loss": proxy_loss,
