@@ -18,22 +18,22 @@ class KVDecompressor(nn.Module):
     Architecture: [D + pos_emb] → 4D → 2D → D  (3-layer MLP)
     """
 
-    def __init__(self, dim: int, chunk_size: int = 4, hidden_mult: int = 4):
+    def __init__(self, dim: int, chunk_size: int = 4, hidden_mult: int = 4, depth: int = 5):
         super().__init__()
         self.dim = dim
         self.chunk_size = chunk_size
 
-        # Learned position embeddings for offsets 0..K-1
         self.pos_emb = nn.Embedding(chunk_size, dim)
 
-        # MLP: input = compressed_kv + pos_emb → expanded_kv
-        self.net = nn.Sequential(
-            nn.Linear(dim * 2, dim * hidden_mult), nn.GELU(),
-            nn.Linear(dim * hidden_mult, dim * hidden_mult * 2), nn.GELU(),
-            nn.Linear(dim * hidden_mult * 2, dim * hidden_mult), nn.GELU(),
-            nn.Linear(dim * hidden_mult, dim * 2), nn.GELU(),
-            nn.Linear(dim * 2, dim),
-        )
+        layers = []
+        in_dim = dim * 2
+        for i in range(depth):
+            out_dim = dim * hidden_mult if i < depth - 1 else dim
+            layers.append(nn.Linear(in_dim, out_dim))
+            if i < depth - 1:
+                layers.append(nn.GELU())
+            in_dim = out_dim
+        self.net = nn.Sequential(*layers)
 
     def forward(self, compressed_kv: torch.Tensor) -> torch.Tensor:
         """

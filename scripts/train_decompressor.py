@@ -48,10 +48,10 @@ def main():
 
     # Use KV head dim, not hidden_size
     head_dim = model.config.head_dim
-    decompressor = KVDecompressor(head_dim, K).to(device=device, dtype=model.dtype)
+    decompressor = KVDecompressor(head_dim, K, depth=5).to(device=device, dtype=model.dtype)
     decompressor.train()
 
-    optimizer = torch.optim.AdamW(decompressor.parameters(), lr=5e-4, weight_decay=0.01)
+    optimizer = torch.optim.AdamW(decompressor.parameters(), lr=1e-3, weight_decay=0.01)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10000, eta_min=1e-5)
 
     STEPS = 5000
