@@ -78,12 +78,11 @@ qwen3_6_27b_gpu = TrainConfig(
 qwen3_5_08b_dgx = TrainConfig(
     model_id="Qwen/Qwen3.5-0.8B-Base",
     dtype="bfloat16",
-    attn_implementation="flash_attention_2",
+    attn_implementation="sdpa",
     steps=15000,
     chunk_size=4,
     length_schedule={
         0: 256, 2000: 512, 4000: 1024, 6000: 2048,
         8000: 4096, 10000: 8192, 11500: 16384, 13000: 32768,
-        14000: 65536, 14500: 131072,
     },
 )
