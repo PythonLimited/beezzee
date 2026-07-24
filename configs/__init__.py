@@ -13,11 +13,11 @@ class TrainConfig:
     dtype: str = "float16"
 
     # ── Chunker ──
-    chunker_type: str = "linear"         # mean | attention | linear
+    chunker_type: str = "mean"             # mean = parameterless baseline (proven) | linear/attention = experimental
     chunk_size: int = 4                  # K tokens → 1 embedding
 
     # ── Decompressor ──
-    train_decompressor: bool = False     # enable after chunker converges
+    train_decompressor: bool = True      # train decompressor (main quality driver)
 
     # ── Training ──
     steps: int = 14000

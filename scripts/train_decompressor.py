@@ -1,7 +1,14 @@
-"""Train KV decompressor from a chunker checkpoint (separate project).
+"""Train KV decompressor — the component that fixes generation quality.
 
 Usage:
-    python scripts/train_decompressor.py checkpoints/chunker_linear_k4_step14400.pt
+    # Default: mean-pool chunker (no training needed), K=4
+    python scripts/train_decompressor.py
+
+    # Custom chunk size
+    python scripts/train_decompressor.py --chunk-size 8
+
+    # With a pre-trained chunker checkpoint
+    python scripts/train_decompressor.py checkpoints/chunker_linear_k4_step4000.pt
 """
 
 import sys
@@ -9,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import argparse
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -18,18 +26,37 @@ from src.trainer import TextDataset
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("chunker_ckpt", type=str, nargs="?", default=None,
+                        help="Optional chunker checkpoint (defaults to mean-pool)")
+    parser.add_argument("--chunk-size", type=int, default=4,
+                        help="Chunk size K (default: 4)")
+    parser.add_argument("--steps", type=int, default=5000)
+    parser.add_argument("--seq-len", type=int, default=256)
+    args = parser.parse_args()
+
     MODEL_DIR = Path("models/Qwen_Qwen3.5-0.8B-Base")
-    ckpt_path = Path(sys.argv[1]) if len(sys.argv) > 1 else None
-    if not ckpt_path or not ckpt_path.exists():
-        print("Usage: python scripts/train_decompressor.py checkpoints/chunker_*.pt")
-        return
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    ckpt = torch.load(ckpt_path, map_location="cpu")
-    K = ckpt["chunk_size"]
-    print(f"Chunker: step={ckpt['step']}  K={K}")
+    ckpt = None
+    K = args.chunk_size
+    chunker_type = "mean"
+    hidden_dim = 1024  # Qwen3.5-0.8B
+
+    if args.chunker_ckpt:
+        ckpt_path = Path(args.chunker_ckpt)
+        if not ckpt_path.exists():
+            print(f"Checkpoint not found: {ckpt_path}")
+            return
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        K = ckpt.get("chunk_size", args.chunk_size)
+        chunker_type = ckpt.get("chunker_type", "linear")
+        hidden_dim = ckpt.get("hidden_dim", 1024)
+        print(f"Chunker: type={chunker_type}  K={K}  step={ckpt.get('step','?')}")
+    else:
+        print(f"Chunker: mean-pool (no training needed)  K={K}")
 
     print(f"Loading model from {MODEL_DIR} ...")
     tokenizer = AutoTokenizer.from_pretrained(str(MODEL_DIR))
@@ -40,13 +67,13 @@ def main():
         low_cpu_mem_usage=True,
     ).to(device).eval()
 
-    chunker = build_chunker(ckpt["chunker_type"], ckpt["hidden_dim"], K)
-    chunker.load_state_dict(ckpt["chunker_state"])
+    chunker = build_chunker(chunker_type, hidden_dim, K)
+    if ckpt:
+        chunker.load_state_dict(ckpt["chunker_state"])
     chunker = chunker.to(device=device, dtype=model.dtype).eval()
     for p in chunker.parameters():
         p.requires_grad = False
 
-    # Use KV head dim, not hidden_size
     head_dim = model.config.head_dim
     decompressor = KVDecompressor(head_dim, K, depth=5).to(device=device, dtype=model.dtype)
     decompressor.train()
@@ -64,12 +91,13 @@ def main():
     optimizer = torch.optim.AdamW(decompressor.parameters(), lr=1e-3, weight_decay=0.01)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10000, eta_min=1e-5)
 
-    STEPS = 5000
-    seq_len = 256
+    STEPS = args.steps
+    seq_len = args.seq_len
     print(f"\n{'='*60}")
-    print(f"  Decompressor: 3-layer MLP, K={K}, head_dim={head_dim}")
+    print(f"  Decompressor: 5-layer MLP, K={K}, head_dim={head_dim}")
+    print(f"  Full-attn layers: {sorted(full_attention_layers)} ({len(full_attention_layers)}/24)")
     print(f"  Params: {sum(p.numel() for p in decompressor.parameters()):,}")
-    print(f"  Steps: {STEPS}")
+    print(f"  Steps: {STEPS}  Seq len: {seq_len}")
     print(f"{'='*60}\n")
 
     dataset = TextDataset(tokenizer, seq_len=seq_len)
@@ -89,12 +117,10 @@ def main():
         input_ids = input_ids[:, :N]
         dtype = next(model.parameters()).dtype
 
-        # Ground truth: full prefill → KV
         with torch.no_grad():
             gt_out = model(input_ids=input_ids, use_cache=True)
             gt_cache = gt_out.past_key_values
 
-        # Compressed prefill → compressed KV (sparse positions, aligns with teacher)
         with torch.no_grad():
             embeds_full = model.get_input_embeddings()(input_ids)
             compressed = chunker(embeds_full)
@@ -104,7 +130,6 @@ def main():
             comp_out = model(inputs_embeds=compressed.to(dtype), position_ids=pos_c, use_cache=True)
             comp_cache = comp_out.past_key_values
 
-        # Decompress and compute MSE for each full-attention layer
         loss = torch.tensor(0.0, device=device)
         n_layers = 0
         for layer_idx, (comp_layer, gt_layer) in enumerate(
@@ -136,19 +161,25 @@ def main():
         running_loss += loss.item()
 
         if (step + 1) % 50 == 0:
-            print(f"  Step {step+1:5d}/{STEPS} | loss: {running_loss/50:.6f} | lr: {scheduler.get_last_lr()[0]:.2e}")
+            pct = 100 * (step + 1) / STEPS
+            print(f"  Step {step+1:5d}/{STEPS} ({pct:3.0f}%) | "
+                  f"loss: {running_loss/50:.6f} | lr: {scheduler.get_last_lr()[0]:.2e}")
             running_loss = 0.0
 
         if (step + 1) % 500 == 0:
             Path("checkpoints").mkdir(exist_ok=True)
             out = Path("checkpoints") / f"decompressor_k{K}_step{step+1}.pt"
             torch.save({
-                "step": step + 1, "decompressor_state": decompressor.state_dict(),
-                "chunk_size": K, "head_dim": head_dim,
+                "step": step + 1,
+                "decompressor_state": decompressor.state_dict(),
+                "chunk_size": K,
+                "head_dim": head_dim,
             }, out)
-            print(f"           saved → {out}")
+            print(f"           saved -> {out}")
 
-    print("\nDone.")
+    print("\nDone. Now run:")
+    print(f"  python scripts/eval_e2e.py --decompressor checkpoints/decompressor_k{K}_step{STEPS}.pt "
+          f"--max-length 4096 --chunk-sizes {K} --gen-tokens 25")
 
 
 if __name__ == "__main__":
