@@ -63,8 +63,8 @@ class MTCTrainer:
         print(f"Trainable params: {sum(p.numel() for p in params):,} ({label})")
 
         self.optimizer = torch.optim.AdamW(params, lr=5e-4, weight_decay=0.01)
-        self.scheduler = torch.optim.lr_scheduler.StepLR(
-            self.optimizer, step_size=4000, gamma=0.5
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            self.optimizer, T_0=4000, T_mult=2, eta_min=1e-5
         )
 
     @torch.no_grad()
