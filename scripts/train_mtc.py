@@ -117,7 +117,6 @@ def main():
 
     trainer.optimizer.param_groups[0]["lr"] = cfg.lr
     trainer.optimizer.param_groups[0]["weight_decay"] = cfg.weight_decay
-    trainer.scheduler.T_max = cfg.lr_scheduler_tmax
     cfg.checkpoints_dir.mkdir(exist_ok=True)
 
     # Pool: all lengths up to the current milestone (anti-forgetting + memory-safe)
@@ -227,9 +226,22 @@ def main():
                 running_kv = 0.0
                 running_top1 = 0.0
 
+                eval_prompts = [
+                    ("The history of artificial intelligence dates back to the 1950s when "
+                     "researchers first began exploring the possibility of machine reasoning. "
+                     "Early systems used symbolic logic and rule-based approaches to solve "),
+                    ("In computer science, data structures are specialized formats for "
+                     "organizing and storing data. Common types include arrays, linked lists, "
+                     "trees, and hash tables, each with distinct performance characteristics. "),
+                    ("The solar system consists of the Sun and the objects that orbit it, "
+                     "including eight planets, dwarf planets, moons, and countless asteroids. "
+                     "Jupiter is the largest planet with a mass greater than all others combined. "),
+                ]
+                eval_text = eval_prompts[(step + 1) % len(eval_prompts)]
                 eval_ids = tokenizer(
-                    "The capital of France is Paris. " * 8,
+                    eval_text * 8,
                     return_tensors="pt",
+                    truncation=True, max_length=512,
                 ).input_ids.to(device)
 
                 if args.profile:

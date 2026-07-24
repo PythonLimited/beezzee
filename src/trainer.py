@@ -62,9 +62,9 @@ class MTCTrainer:
         label = "chunker+decompressor" if decompressor else "chunker"
         print(f"Trainable params: {sum(p.numel() for p in params):,} ({label})")
 
-        self.optimizer = torch.optim.AdamW(params, lr=1e-4, weight_decay=0.01)
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=15000, eta_min=1e-6
+        self.optimizer = torch.optim.AdamW(params, lr=5e-4, weight_decay=0.01)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(
+            self.optimizer, step_size=4000, gamma=0.5
         )
 
     @torch.no_grad()
@@ -113,6 +113,10 @@ class MTCTrainer:
         compressed = self.chunker(embeddings)
         student_hidden, student_kv = self._student_forward(compressed, N)
 
+        # Auxiliary loss: keep chunker anchored to mean pool (stable baseline)
+        mean_target = embeddings[:, :n_full * K, :].view(B, n_full, K, -1).mean(dim=2).detach()
+        aux_loss = F.mse_loss(compressed, mean_target)
+
         # Chunker loss: MSE on hidden states (straight-through proxy)
         loss_hidden = F.mse_loss(student_hidden, teacher_hidden)
         grad_output = (student_hidden - teacher_hidden) * (2.0 / student_hidden.numel())
@@ -144,10 +148,10 @@ class MTCTrainer:
                 loss_kv = loss_kv / n_layers
                 loss_kv_tensor = loss_kv_tensor / n_layers
 
-        # Combined proxy: chunker (always) + optional decompressor
-        combined_proxy = proxy_loss
+        # Combined proxy: chunker straight-through + aux anchor + optional decompressor
+        combined_proxy = proxy_loss + 0.05 * aux_loss
         if loss_kv_tensor is not None:
-            combined_proxy = proxy_loss + 0.1 * loss_kv_tensor
+            combined_proxy = combined_proxy + 0.1 * loss_kv_tensor
 
         # Top-1 monitoring
         with torch.no_grad():
