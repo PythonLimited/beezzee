@@ -71,7 +71,7 @@ def report(chunker_path: str, decompressor_path: str | None = None,
     ckpt = torch.load(chunker_path, map_location="cpu")
     K = ckpt.get("chunk_size", 4)
     chunk_name = ckpt.get("chunker_type", "linear")
-    step = ckpt.get("step", "?")
+    step = ckpt.get("step", 0)
     hidden_dim = ckpt.get("hidden_dim", _model.config.hidden_size)
 
     decompressor = None
@@ -137,7 +137,7 @@ def report(chunker_path: str, decompressor_path: str | None = None,
         speedup = t_std / t_mtc if t_mtc > 0 else 0
 
         print(
-            f"REPORT | step={step:>6s}  K={K}  len={actual_len:>5d}  "
+            f"REPORT | step={step:>6d}  K={K}  len={actual_len:>5d}  "
             f"top1={div['top1_match']}  jsd={div['js_divergence']:.4e}  "
             f"cos={div['cosine_sim']:.4f}  "
             f"fillup={speedup:.1f}x({t_std*1000:.0f}/{t_mtc*1000:.0f}ms)  "
