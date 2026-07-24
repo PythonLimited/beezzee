@@ -17,7 +17,7 @@ class TrainConfig:
     chunk_size: int = 4                  # K tokens → 1 embedding
 
     # ── Decompressor ──
-    train_decompressor: bool = True      # joint training with KV decompressor
+    train_decompressor: bool = False     # enable after chunker converges
 
     # ── Training ──
     steps: int = 15000

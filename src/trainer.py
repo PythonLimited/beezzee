@@ -124,10 +124,10 @@ class MTCTrainer:
                 loss_kv = loss_kv / n_layers
                 loss_kv_tensor = loss_kv_tensor / n_layers
 
-        # Combined proxy for backward: chunker + decompressor
+        # Combined proxy: chunker (always) + optional decompressor
         combined_proxy = proxy_loss
         if loss_kv_tensor is not None:
-            combined_proxy = proxy_loss + loss_kv_tensor
+            combined_proxy = proxy_loss + 0.01 * loss_kv_tensor
 
         # Top-1 monitoring
         with torch.no_grad():
