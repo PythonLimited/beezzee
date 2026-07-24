@@ -23,7 +23,7 @@ class TrainConfig:
     steps: int = 14000
     eval_every: int = 100
     kl_temperature: float = 2.0
-    lr: float = 1e-4
+    lr: float = 2e-4  # higher LR for faster convergence
     weight_decay: float = 0.01
     lr_scheduler_tmax: int = 15000
     grad_clip: float = 1.0

@@ -3,7 +3,7 @@
 Single GPU:
     python scripts/train_mtc.py --config qwen3_5_08b_dgx
 
-Multi-GPU:
+Multi-GPU (data parallel):
     accelerate launch --config_file configs/accelerate_dgx.yaml scripts/train_mtc.py --config qwen3_5_08b_dgx
 """
 
@@ -30,15 +30,17 @@ PRESETS = {
 }
 
 
-def ensure_model_local(cfg, accelerator):
+def ensure_model_local(cfg: TrainConfig, accelerator):
     local = cfg.local_model_dir
     done_file = local / ".download_complete"
     if done_file.exists():
         return
+
     if accelerator.is_main_process:
         print(f"Downloading {cfg.model_id} → {local} ...")
         snapshot_download(cfg.model_id, local_dir=str(local), local_dir_use_symlinks=False)
         done_file.touch()
+
     accelerator.wait_for_everyone()
 
 
@@ -46,12 +48,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=None, choices=list(PRESETS))
     parser.add_argument("--profile", action="store_true")
-    parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint .pt file")
     args = parser.parse_args()
 
     cfg = PRESETS.get(args.config, TrainConfig())
 
     accelerator = Accelerator(mixed_precision="bf16" if cfg.dtype == "bfloat16" else "no")
+    # Accelerator only knows CUDA/CPU — handle MPS manually
     if torch.cuda.is_available():
         device = torch.device("cuda")
     elif torch.backends.mps.is_available():
@@ -81,13 +84,16 @@ def main():
     model.eval()
 
     chunker = build_chunker(cfg.chunker_type, model.config.hidden_size, cfg.chunk_size)
+    # fp32 chunker on MPS (fp16 gradients unstable), match model dtype on CUDA
     chunk_dtype = torch.float32 if device.type == "mps" else model.dtype
     chunker = chunker.to(device=device, dtype=chunk_dtype)
     chunker.train()
 
     decompressor = None
     if cfg.train_decompressor:
-        decompressor = KVDecompressor(model.config.head_dim, cfg.chunk_size)
+        decompressor = KVDecompressor(
+            model.config.head_dim, cfg.chunk_size  # KV head dim, not hidden_size
+        )
         decompressor = decompressor.to(device=device, dtype=model.dtype)
         decompressor.train()
 
@@ -95,7 +101,6 @@ def main():
         base_model=model, chunker=chunker, chunk_size=cfg.chunk_size,
         decompressor=decompressor,
     )
-
     start_step = 0
     if args.resume:
         ckpt = torch.load(args.resume, map_location="cpu")
@@ -105,7 +110,7 @@ def main():
             trainer.optimizer.load_state_dict(ckpt["optimizer_state"])
         if "scheduler_state" in ckpt:
             trainer.scheduler.load_state_dict(ckpt["scheduler_state"])
-        if cfg.train_decompressor and decompressor and "decompressor_state" in ckpt:
+        if cfg.train_decompressor and decompressor is not None and "decompressor_state" in ckpt:
             decompressor.load_state_dict(ckpt["decompressor_state"])
         if accelerator.is_main_process:
             print(f"Resumed from step {start_step}")
@@ -115,22 +120,33 @@ def main():
     trainer.scheduler.T_max = cfg.lr_scheduler_tmax
     cfg.checkpoints_dir.mkdir(exist_ok=True)
 
-    trainer.optimizer, trainer.scheduler = accelerator.prepare(trainer.optimizer, trainer.scheduler)
+    # Pool: all lengths up to the current milestone (anti-forgetting + memory-safe)
+    import random
+    all_lengths = sorted(set(cfg.length_schedule.values()))
+    length_milestones = sorted(cfg.length_schedule.items())  # [(step, max_length), ...]
+    milestone_idx = 0
+    available_lengths = [all_lengths[0]]
 
-    # ── Progressive training: one length at a time ──
-    seq_len = cfg.length_schedule[0]
-    dataset = TextDataset(tokenizer, seq_len=seq_len,
-                          rank=accelerator.process_index,
-                          world_size=accelerator.num_processes)
-    data_iter = iter(dataset)
+    datasets: dict[int, TextDataset] = {}
+    data_iters: dict[int, any] = {}
+
+    def get_iter(seq_len):
+        if seq_len not in datasets:
+            datasets[seq_len] = TextDataset(
+                tokenizer, seq_len=seq_len,
+                rank=accelerator.process_index,
+                world_size=accelerator.num_processes,
+            )
+        if seq_len not in data_iters:
+            data_iters[seq_len] = iter(datasets[seq_len])
+        return data_iters[seq_len]
 
     if accelerator.is_main_process:
         print(f"\n{'='*60}")
         print(f"  Chunker:   {cfg.chunker_type}, K={cfg.chunk_size}")
         print(f"  Params:    {sum(p.numel() for p in chunker.parameters()):,}")
         print(f"  Steps:     {cfg.steps}")
-        print(f"  Schedule:  progressive {dict(sorted(cfg.length_schedule.items()))}")
-        print(f"{'='*60}\n")
+        print(f"  Lengths:   {all_lengths}")
 
     running_loss = 0.0
     running_kv = 0.0
@@ -138,31 +154,36 @@ def main():
 
     if args.profile:
         import time
-        t_step = 0.0
+        t_data = t_step = t_eval = 0.0
         t_count = 0
         t_wall_start = time.perf_counter()
 
     for step in range(start_step, cfg.steps):
-        if step > 0 and step in cfg.length_schedule:
-            new_len = cfg.length_schedule[step]
-            if accelerator.is_main_process:
-                print(f"\n  ══ Seq len {seq_len} → {new_len}  (step {step}) ══\n")
-            seq_len = new_len
-            dataset = TextDataset(tokenizer, seq_len=new_len,
-                                  rank=accelerator.process_index,
-                                  world_size=accelerator.num_processes)
-            data_iter = iter(dataset)
+        # Expand available lengths at milestone steps
+        while (milestone_idx < len(length_milestones) and
+               step >= length_milestones[milestone_idx][0]):
+            max_len = length_milestones[milestone_idx][1]
+            available_lengths = [l for l in all_lengths if l <= max_len]
+            if accelerator.is_main_process and milestone_idx > 0:
+                print(f"\n  ══ +{max_len} tokens (now {len(available_lengths)} lengths, step {step}) ══\n")
+            milestone_idx += 1
+
+        # Randomly pick a length from available pool
+        seq_len = random.choice(available_lengths)
+        data_iter = get_iter(seq_len)
+
+        if args.profile:
+            t0 = time.perf_counter()
 
         try:
             input_ids = next(data_iter).to(device)
         except StopIteration:
-            dataset = TextDataset(tokenizer, seq_len=seq_len,
-                                  rank=accelerator.process_index,
-                                  world_size=accelerator.num_processes)
-            data_iter = iter(dataset)
+            data_iters.pop(seq_len, None)
+            data_iter = get_iter(seq_len)
             input_ids = next(data_iter).to(device)
 
         if args.profile:
+            t_data += time.perf_counter() - t0
             t0 = time.perf_counter()
 
         metrics = trainer.train_step(input_ids)
@@ -178,18 +199,25 @@ def main():
             t_step += time.perf_counter() - t0
 
         running_loss += metrics["loss"]
-        running_kv += metrics.get("loss_kv", 0)
         running_top1 += metrics["top1_match"]
 
         if (step + 1) % cfg.eval_every == 0:
             if accelerator.is_main_process:
+                if args.profile:
+                    t0 = time.perf_counter()
+                    t_count += 1
+
                 avg_loss = running_loss / cfg.eval_every
                 avg_kv = running_kv / cfg.eval_every
                 avg_top1 = running_top1 / cfg.eval_every
-                kv_str = f" | kv:{avg_kv:.6f}" if cfg.train_decompressor else ""
-
+                kv_str = f" | kv({metrics.get('n_kv_layers',0)}):{avg_kv:.8f}" if cfg.train_decompressor else ""
+                dbg = getattr(trainer, '_dbg', None)
+                if dbg:
+                    kv_str += f" [C={dbg[0][2]} K={dbg[0][3]} N={dbg[2][2]} lk={dbg[3]:.4f}]"
+                    trainer._dbg = None
                 print(
                     f"  Step {step+1:5d}/{cfg.steps} | "
+                    f"len:{input_ids.shape[1]:5d} | "
                     f"loss: {avg_loss:.6f}{kv_str} | "
                     f"top1: {avg_top1:.3f} | "
                     f"lr: {metrics['lr']:.4e}"
@@ -199,10 +227,29 @@ def main():
                 running_kv = 0.0
                 running_top1 = 0.0
 
-                eval_ids = tokenizer("The capital of France is Paris. " * 8, return_tensors="pt").input_ids.to(device)
-                eval_metrics = eval_step(trainer, eval_ids)
-                print(f"           eval | loss: {eval_metrics['eval_loss']:.6f} | top1: {eval_metrics['eval_top1']:.3f}")
+                eval_ids = tokenizer(
+                    "The capital of France is Paris. " * 8,
+                    return_tensors="pt",
+                ).input_ids.to(device)
 
+                if args.profile:
+                    t0_e = time.perf_counter()
+
+                eval_metrics = eval_step(trainer, eval_ids)
+
+                if args.profile:
+                    t_eval += time.perf_counter() - t0_e
+
+                print(
+                    f"           eval | "
+                    f"loss: {eval_metrics['eval_loss']:.6f} | "
+                    f"top1: {eval_metrics['eval_top1']:.3f}"
+                )
+
+                ckpt_path = (
+                    cfg.checkpoints_dir
+                    / f"chunker_{cfg.chunker_type}_k{cfg.chunk_size}_step{step+1}.pt"
+                )
                 save_dict = {
                     "step": step + 1,
                     "chunker_state": accelerator.unwrap_model(chunker).state_dict(),
@@ -216,18 +263,21 @@ def main():
                 }
                 if cfg.train_decompressor:
                     save_dict["decompressor_state"] = accelerator.unwrap_model(decompressor).state_dict()
-
-                ckpt_path = cfg.checkpoints_dir / f"chunker_{cfg.chunker_type}_k{cfg.chunk_size}_step{step+1}.pt"
                 torch.save(save_dict, ckpt_path)
                 print(f"           saved → {ckpt_path}")
 
                 if args.profile and t_count > 0:
                     elapsed = time.perf_counter() - t_wall_start
-                    steps_done = step + 1 - start_step
-                    steps_left = cfg.steps - step - 1
-                    sec_per_step = elapsed / max(steps_done, 1)
+                    steps_done = step + 1
+                    steps_left = cfg.steps - steps_done
+                    sec_per_step = elapsed / steps_done
                     eta = sec_per_step * steps_left
-                    print(f"           ── elapsed: {elapsed/60:5.1f}m  eta: {eta/60:5.1f}m  step: {t_step/t_count*1000:6.0f}ms/block")
+                    print(
+                        f"           ── elapsed: {elapsed/60:5.1f}m  "
+                        f"eta: {eta/60:5.1f}m  "
+                        f"step: {t_step/t_count*1000:6.0f}ms/block"
+                        f"  ({t_step/t_count/cfg.eval_every*1000:.1f}ms/step)"
+                    )
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
