@@ -83,7 +83,7 @@ def main():
     mtc.chunker.eval()
 
     print(f"\n{'─'*78}")
-    print(f"  {'prompt':12s} | {'N':>5s}→{'N/K':>4s} | {'JS':>8s} | {'cos':>5s} | {'top1':>4s} | {'std':>7s} | {'mtc':>7s} |  ×")
+    print(f"  {'prompt':12s} | {'N':>5s}→{'N/K':>4s} | {'⊿%':>7s} | {'cos':>5s} | {'top1':>4s} | {'std':>7s} | {'mtc':>7s} |  ×")
     print(f"{'─'*78}")
 
     total, matched = 0, 0
@@ -154,12 +154,13 @@ def main():
             total += 1
 
             js = div['js_divergence']
+            js_pct = js * 100  # % distribution difference
             if js < 1e-5:
-                js_str = f"\033[32m{js:.1e}\033[0m"   # green = great
+                js_str = f"\033[32m{js_pct:.3f}%\033[0m"
             elif js < 1e-4:
-                js_str = f"\033[33m{js:.1e}\033[0m"   # yellow = ok
+                js_str = f"\033[33m{js_pct:.3f}%\033[0m"
             else:
-                js_str = f"\033[31m{js:.1e}\033[0m"   # red = poor
+                js_str = f"\033[31m{js_pct:.3f}%\033[0m"
 
             cos = div['cosine_sim']
             if cos > 0.3:
