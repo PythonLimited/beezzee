@@ -128,6 +128,7 @@ class MTCTrainer:
             "top1_match": top1,
             "lr": self.scheduler.get_last_lr()[0],
             "_proxy_loss": proxy_loss,
+            "n_kv_layers": n_layers if self.decompressor is not None else 0,
         }
 
 

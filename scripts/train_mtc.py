@@ -195,7 +195,7 @@ def main():
                 avg_loss = running_loss / cfg.eval_every
                 avg_kv = running_kv / cfg.eval_every
                 avg_top1 = running_top1 / cfg.eval_every
-                kv_str = f" | kv:{avg_kv:.6f}" if cfg.train_decompressor else ""
+                kv_str = f" | kv({metrics.get('n_kv_layers',0)}):{avg_kv:.8f}" if cfg.train_decompressor else ""
                 print(
                     f"  Step {step+1:5d}/{cfg.steps} | "
                     f"len:{input_ids.shape[1]:5d} | "
