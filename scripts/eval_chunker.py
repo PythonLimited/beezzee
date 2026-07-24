@@ -154,7 +154,7 @@ def main():
             total += 1
 
             js = div['js_divergence']
-            if js < 1e-5:
+            if js < 2e-5:
                 js_str = f"\033[32m{js:.1e}\033[0m"   # green = great
             elif js < 1e-4:
                 js_str = f"\033[33m{js:.1e}\033[0m"   # yellow = ok
