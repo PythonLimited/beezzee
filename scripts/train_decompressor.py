@@ -79,19 +79,18 @@ def main():
         B, N = input_ids.shape
         dtype = next(model.parameters()).dtype
 
-        # Ground truth: full prefill → KV from full-attention layers
+        # Ground truth: full prefill → KV
         with torch.no_grad():
-            embeds_full = model.get_input_embeddings()(input_ids)
-            pos_full = torch.arange(N, device=device).unsqueeze(0)
-            _, gt_cache = model.model(inputs_embeds=embeds_full, position_ids=pos_full,
-                                       use_cache=True)
+            gt_out = model(input_ids=input_ids, use_cache=True)
+            gt_cache = gt_out.past_key_values
 
         # Compressed prefill → compressed KV
         with torch.no_grad():
+            embeds_full = model.get_input_embeddings()(input_ids)
             compressed = chunker(embeds_full)
             pos_comp = compatible_position_ids(torch.arange(N, device=device).unsqueeze(0), K)
-            _, comp_cache = model.model(inputs_embeds=compressed.to(dtype),
-                                         position_ids=pos_comp, use_cache=True)
+            comp_out = model(inputs_embeds=compressed.to(dtype), position_ids=pos_comp, use_cache=True)
+            comp_cache = comp_out.past_key_values
 
         # Decompress and compute MSE for each full-attention layer
         loss = torch.tensor(0.0, device=device)
