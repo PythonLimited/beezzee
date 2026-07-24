@@ -48,6 +48,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=None, choices=list(PRESETS))
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint .pt file")
     args = parser.parse_args()
 
     cfg = PRESETS.get(args.config, TrainConfig())
@@ -100,6 +101,20 @@ def main():
         base_model=model, chunker=chunker, chunk_size=cfg.chunk_size,
         decompressor=decompressor,
     )
+    start_step = 0
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location="cpu")
+        chunker.load_state_dict(ckpt["chunker_state"])
+        start_step = ckpt.get("step", 0)
+        if "optimizer_state" in ckpt:
+            trainer.optimizer.load_state_dict(ckpt["optimizer_state"])
+        if "scheduler_state" in ckpt:
+            trainer.scheduler.load_state_dict(ckpt["scheduler_state"])
+        if cfg.train_decompressor and decompressor is not None and "decompressor_state" in ckpt:
+            decompressor.load_state_dict(ckpt["decompressor_state"])
+        if accelerator.is_main_process:
+            print(f"Resumed from step {start_step}")
+
     trainer.optimizer.param_groups[0]["lr"] = cfg.lr
     trainer.optimizer.param_groups[0]["weight_decay"] = cfg.weight_decay
     trainer.scheduler.T_max = cfg.lr_scheduler_tmax
@@ -143,7 +158,7 @@ def main():
         t_count = 0
         t_wall_start = time.perf_counter()
 
-    for step in range(cfg.steps):
+    for step in range(start_step, cfg.steps):
         # Expand available lengths at milestone steps
         while (milestone_idx < len(length_milestones) and
                step >= length_milestones[milestone_idx][0]):
@@ -238,6 +253,8 @@ def main():
                 save_dict = {
                     "step": step + 1,
                     "chunker_state": accelerator.unwrap_model(chunker).state_dict(),
+                    "optimizer_state": trainer.optimizer.state_dict(),
+                    "scheduler_state": trainer.scheduler.state_dict(),
                     "chunker_type": cfg.chunker_type,
                     "chunk_size": cfg.chunk_size,
                     "hidden_dim": model.config.hidden_size,
