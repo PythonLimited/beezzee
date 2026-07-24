@@ -151,11 +151,23 @@ def main():
     running_kv = 0.0
     running_top1 = 0.0
 
+    baseline_loss = None  # set after first 100 steps
+
     if args.profile:
         import time
         t_data = t_step = t_eval = 0.0
         t_count = 0
         t_wall_start = time.perf_counter()
+
+    # Print column header once
+    if accelerator.is_main_process:
+        print()
+        print(f"{'─'*85}")
+        print(f"  {'step':>5s}  {'done%':>5s}  {'Δ_loss':>8s}  {'top1%':>5s}  "
+              f"{'quality':>9s}  {'lr':>7s}  {'len':>5s}  {'phase':>8s}")
+        print(f"  {'─'*5}  {'─'*5}  {'─'*8}  {'─'*5}  "
+              f"{'─'*9}  {'─'*7}  {'─'*5}  {'─'*8}")
+        print()
 
     for step in range(start_step, cfg.steps):
         # Expand available lengths at milestone steps
@@ -207,25 +219,49 @@ def main():
                     t_count += 1
 
                 avg_loss = running_loss / cfg.eval_every
-                avg_kv = running_kv / cfg.eval_every
                 avg_top1 = running_top1 / cfg.eval_every
-                kv_str = f" | kv({metrics.get('n_kv_layers',0)}):{avg_kv:.8f}" if cfg.train_decompressor else ""
-                dbg = getattr(trainer, '_dbg', None)
-                if dbg:
-                    kv_str += f" [C={dbg[0][2]} K={dbg[0][3]} N={dbg[2][2]} lk={dbg[3]:.4f}]"
-                    trainer._dbg = None
+
+                pct_done = 100 * (step + 1) / cfg.steps
+                pct_top1 = 100 * avg_top1
+
+                # Track baseline (mean-pool quality floor) for loss improvement
+                if baseline_loss is None:
+                    baseline_loss = avg_loss
+
+                # Phase label
+                lengths_now = sorted(available_lengths)
+                if len(lengths_now) <= 2:
+                    phase = "warmup"
+                elif max(lengths_now) <= 2048:
+                    phase = "short"
+                elif max(lengths_now) <= 16384:
+                    phase = "mid"
+                else:
+                    phase = "long"
+
+                # Quality label
+                if pct_top1 >= 70:
+                    quality = "GREAT"
+                elif pct_top1 >= 40:
+                    quality = "GOOD"
+                elif pct_top1 >= 15:
+                    quality = "OK"
+                elif pct_top1 >= 5:
+                    quality = "learning"
+                else:
+                    quality = "noise"
+
+                loss_delta = (baseline_loss - avg_loss) / baseline_loss * 100 if baseline_loss > 0 else 0
+                delta_str = f"-{loss_delta:.1f}%" if loss_delta > 0.1 else "  ~flat"
+
                 print(
-                    f"  Step {step+1:5d}/{cfg.steps} | "
-                    f"len:{input_ids.shape[1]:5d} | "
-                    f"loss: {avg_loss:.6f}{kv_str} | "
-                    f"top1: {avg_top1:.3f} | "
-                    f"lr: {metrics['lr']:.4e}"
+                    f"  {step+1:5d}  {pct_done:4.0f}%  "
+                    f"{delta_str:>8s}  {pct_top1:4.0f}%  "
+                    f"{quality:>9s}  {metrics['lr']:5.0e}  "
+                    f"{input_ids.shape[1]:5d}  {phase:>8s}"
                 )
 
-                running_loss = 0.0
-                running_kv = 0.0
-                running_top1 = 0.0
-
+                # Eval mini-report
                 eval_prompts = [
                     ("The history of artificial intelligence dates back to the 1950s when "
                      "researchers first began exploring the possibility of machine reasoning. "
@@ -247,16 +283,23 @@ def main():
                 if args.profile:
                     t0_e = time.perf_counter()
 
-                eval_metrics = eval_step(trainer, eval_ids)
+                eval_metrics_res = eval_step(trainer, eval_ids)
 
                 if args.profile:
                     t_eval += time.perf_counter() - t0_e
 
+                e_top1 = 100 * eval_metrics_res['eval_top1']
+                e_qual = "++" if e_top1 >= 50 else " ." if e_top1 >= 10 else ".."
+
                 print(
-                    f"           eval | "
-                    f"loss: {eval_metrics['eval_loss']:.6f} | "
-                    f"top1: {eval_metrics['eval_top1']:.3f}"
+                    f"           eval| "
+                    f"loss: {eval_metrics_res['eval_loss']:.5f}  "
+                    f"top1: {e_top1:.0f}%  "
+                    f"{e_qual}"
                 )
+
+                running_loss = 0.0
+                running_top1 = 0.0
 
                 ckpt_path = (
                     cfg.checkpoints_dir
