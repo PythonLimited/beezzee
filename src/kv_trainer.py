@@ -67,7 +67,7 @@ class KVDecompressorTrainer:
 
     @torch.no_grad()
     def _model_forward(self, embeds: torch.Tensor, pos_ids: torch.Tensor) -> tuple:
-        out = self._compiled_model(inputs_embeds=embeds, position_ids=pos_ids, use_cache=True)
+        out = self.base.model(inputs_embeds=embeds, position_ids=pos_ids, use_cache=True)
         return out.last_hidden_state, out.past_key_values
 
     def train_step(self, input_ids: torch.Tensor) -> dict:

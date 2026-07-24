@@ -57,10 +57,6 @@ class MTCTrainer:
         if use_gradient_checkpointing and hasattr(self.base, 'gradient_checkpointing_enable'):
             self.base.gradient_checkpointing_enable()
 
-        self._compiled = not use_gradient_checkpointing
-        if self._compiled:
-            self._compiled_model = torch.compile(self.base.model, mode="default", fullgraph=False)
-
         params = list(self.chunker.parameters())
         if decompressor is not None:
             params += list(decompressor.parameters())
@@ -74,8 +70,7 @@ class MTCTrainer:
 
     @torch.no_grad()
     def _model(self, embeds, pos_ids, use_cache=False):
-        model = self._compiled_model if self._compiled else self.base.model
-        out = model(inputs_embeds=embeds, position_ids=pos_ids, use_cache=use_cache)
+        out = self.base.model(inputs_embeds=embeds, position_ids=pos_ids, use_cache=use_cache)
         return out.last_hidden_state, out.past_key_values
 
     @torch.no_grad()
