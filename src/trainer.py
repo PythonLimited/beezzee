@@ -104,15 +104,22 @@ class MTCTrainer:
 
         # Decompressor loss: MSE on KV caches
         loss_kv = torch.tensor(0.0, device=input_ids.device)
+        n_layers = 0
         if self.decompressor is not None:
-            n_layers = 0
             for comp_layer, gt_layer in zip(student_kv.layers, teacher_kv.layers):
                 if not (hasattr(comp_layer, "keys") and hasattr(gt_layer, "keys")):
                     continue
+                if not hasattr(comp_layer, "values") or not hasattr(gt_layer, "values"):
+                    continue
                 exp_k = self.decompressor(comp_layer.keys)[:, :, :N, :]
                 exp_v = self.decompressor(comp_layer.values)[:, :, :N, :]
-                loss_kv += F.mse_loss(exp_k, gt_layer.keys) + F.mse_loss(exp_v, gt_layer.values)
+                lk = F.mse_loss(exp_k, gt_layer.keys)
+                lv = F.mse_loss(exp_v, gt_layer.values)
+                loss_kv += lk + lv
                 n_layers += 1
+                # Debug first layer
+                if n_layers == 1:
+                    self._dbg = (comp_layer.keys.shape, gt_layer.keys.shape, exp_k.shape, lk.item())
             if n_layers > 0:
                 loss_kv = loss_kv / n_layers
 

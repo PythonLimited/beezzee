@@ -196,6 +196,10 @@ def main():
                 avg_kv = running_kv / cfg.eval_every
                 avg_top1 = running_top1 / cfg.eval_every
                 kv_str = f" | kv({metrics.get('n_kv_layers',0)}):{avg_kv:.8f}" if cfg.train_decompressor else ""
+                dbg = getattr(trainer, '_dbg', None)
+                if dbg:
+                    kv_str += f" [C={dbg[0][2]} K={dbg[0][3]} N={dbg[2][2]} lk={dbg[3]:.4f}]"
+                    trainer._dbg = None
                 print(
                     f"  Step {step+1:5d}/{cfg.steps} | "
                     f"len:{input_ids.shape[1]:5d} | "
